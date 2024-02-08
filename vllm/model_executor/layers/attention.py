@@ -7,6 +7,7 @@ from xformers import ops as xops
 from xformers.ops.fmha.attn_bias import (BlockDiagonalCausalMask,
                                          LowerTriangularMaskWithTensorBias)
 
+import os
 from vllm._C import ops
 from vllm._C import cache_ops
 from vllm.model_executor.input_metadata import InputMetadata
@@ -188,6 +189,20 @@ class PagedAttention(nn.Module):
                 self.scale,
                 self.alibi_slopes,
             )
+            
+            if os.environ.get('CHECKOUT', '0') == '1':
+                os.makedirs('./cache/llama', exist_ok=True)
+                torch.save({
+                    "query": query,
+                    "key_cache": key_cache,
+                    "value_cache": value_cache,
+                    "input_metadata": input_metadata,
+                    "num_kv_heads": self.num_kv_heads,
+                    "scale": self.scale,
+                    "alibi_slopes": self.alibi_slopes,
+                    "output": output,
+                }, 'cache/llama/vllmout.pth')
+                input('press enter to continue >>>')
 
         # Reshape the output tensor.
         return output.view(batch_size, seq_len, hidden_size)
