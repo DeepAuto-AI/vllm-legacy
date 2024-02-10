@@ -192,17 +192,18 @@ class PagedAttention(nn.Module):
             
             if os.environ.get('CHECKOUT', '0') == '1':
                 os.makedirs('./cache/llama', exist_ok=True)
-                torch.save({
-                    "query": query,
-                    "key_cache": key_cache,
-                    "value_cache": value_cache,
-                    "input_metadata": input_metadata,
-                    "num_kv_heads": self.num_kv_heads,
-                    "scale": self.scale,
-                    "alibi_slopes": self.alibi_slopes,
-                    "output": output,
-                }, 'cache/llama/vllmout.pth')
-                input('press enter to continue >>>')
+                inp = input('press y to store >>>').lower()
+                if inp.startswith('y'):
+                    torch.save({
+                        "query": query,
+                        "key_cache": key_cache,
+                        "value_cache": value_cache,
+                        "input_metadata": input_metadata,
+                        "num_kv_heads": self.num_kv_heads,
+                        "scale": self.scale,
+                        "alibi_slopes": self.alibi_slopes,
+                        "output": output,
+                    }, 'cache/llama/vllmout.pth')
 
         # Reshape the output tensor.
         return output.view(batch_size, seq_len, hidden_size)
