@@ -180,19 +180,10 @@ class PagedAttention(nn.Module):
 
         else:
             # Decoding run.
-            output = _paged_attention(
-                query,
-                key_cache,
-                value_cache,
-                input_metadata,
-                self.num_kv_heads,
-                self.scale,
-                self.alibi_slopes,
-            )
-            
+            backend = os.environ.get('PAGED_ATTENTION_BACKEND', 'vllm')
             if os.environ.get('CHECKOUT', '0') == '1':
                 os.makedirs('./cache/llama', exist_ok=True)
-                inp = input('press y to store >>>').lower()
+                inp = input(f'press y to store ({query.shape}, {input_metadata.block_tables.shape}) >>>').lower()
                 if inp.startswith('y'):
                     torch.save({
                         "query": query,
@@ -204,6 +195,35 @@ class PagedAttention(nn.Module):
                         "alibi_slopes": self.alibi_slopes,
                         "output": output,
                     }, 'cache/llama/vllmout.pth')
+
+            if backend == 'vllm':
+                output = _paged_attention(
+                    query,
+                    key_cache,
+                    value_cache,
+                    input_metadata,
+                    self.num_kv_heads,
+                    self.scale,
+                    self.alibi_slopes,
+                )    
+            elif backend == 'timber':
+                from timber.models.timber_attention.attention1_block_gpu import paged_timber_attention
+                output, _ = paged_timber_attention(
+                    q=query,
+                    q_scale=self.scale,
+                    k=key_cache,
+                    v=value_cache,
+                    block_tables=input_metadata.block_tables,
+                    context_lens=input_metadata.context_lens,
+                    max_context_len=input_metadata.max_context_len,
+                    attention_mask=None,
+                    mask_k=512,
+                    block_size_k=2,
+                    block_size_q=16
+                )
+                # print('hello')
+            else:
+                raise Exception()
 
         # Reshape the output tensor.
         return output.view(batch_size, seq_len, hidden_size)
