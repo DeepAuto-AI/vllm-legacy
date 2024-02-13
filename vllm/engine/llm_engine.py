@@ -986,8 +986,10 @@ class LLMEngine:
             driver_kwargs = kwargs
 
         # Start the driver worker after all the ray workers.
-        driver_worker_output = getattr(self.driver_worker,
-                                       method)(*driver_args, **driver_kwargs)
+        driver_worker_output = getattr(
+            self.driver_worker,
+            method
+        )(*driver_args, **driver_kwargs)
 
         # Get the results of the ray workers.
         if self.workers:

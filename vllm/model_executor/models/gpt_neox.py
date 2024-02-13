@@ -271,6 +271,8 @@ class GPTNeoXForCausalLM(nn.Module):
             if ("attention.bias" in name or "attention.masked_bias" in name
                     or "rotary_emb.inv_freq" in name):
                 continue
+            if name not in params_dict:
+                continue
             param = params_dict[name]
 
             if "query_key_value" in name:

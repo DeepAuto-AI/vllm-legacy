@@ -1,5 +1,6 @@
 """Multi-head attention."""
 from typing import List, Optional
+import warnings
 
 import torch
 import torch.nn as nn
@@ -181,6 +182,7 @@ class PagedAttention(nn.Module):
         else:
             # Decoding run.
             backend = os.environ.get('PAGED_ATTENTION_BACKEND', 'vllm')
+            warnings.warn(f'query_size: {query.shape}, block_table: {input_metadata.block_tables.shape}[{input_metadata.max_context_len}/{input_metadata.max_seq_len}]')
             if os.environ.get('CHECKOUT', '0') == '1':
                 os.makedirs('./cache/llama', exist_ok=True)
                 inp = input(f'press y to store ({query.shape}, {input_metadata.block_tables.shape}) >>>').lower()
@@ -196,6 +198,10 @@ class PagedAttention(nn.Module):
                         "output": output,
                     }, 'cache/llama/vllmout.pth')
 
+            start = torch.cuda.Event(enable_timing=True)
+            end = torch.cuda.Event(enable_timing=True)
+            start.record()
+            
             if backend == 'vllm':
                 output = _paged_attention(
                     query,
@@ -218,12 +224,16 @@ class PagedAttention(nn.Module):
                     max_context_len=input_metadata.max_context_len,
                     attention_mask=None,
                     mask_k=512,
-                    block_size_k=2,
+                    block_size_k=4,
                     block_size_q=16
                 )
                 # print('hello')
             else:
                 raise Exception()
+            
+            end.record()
+            torch.cuda.synchronize()
+            print(start.elapsed_time(end))
 
         # Reshape the output tensor.
         return output.view(batch_size, seq_len, hidden_size)
