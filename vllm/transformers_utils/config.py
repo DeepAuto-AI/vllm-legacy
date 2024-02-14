@@ -15,10 +15,16 @@ _CONFIG_REGISTRY = {
     "yi": YiConfig,
 }
 
+# NOTE: For benchmarking
+FORCE_SIGNLE_LAYER = False
 
-def get_config(model: str,
-               trust_remote_code: bool,
-               revision: Optional[str] = None) -> PretrainedConfig:
+def get_config(
+    model: str,
+    trust_remote_code: bool,
+    revision: Optional[str] = None
+) -> PretrainedConfig:
+    global FORCE_SIGNLE_LAYER
+    
     try:
         config = AutoConfig.from_pretrained(
             model, trust_remote_code=trust_remote_code, revision=revision)
@@ -38,6 +44,7 @@ def get_config(model: str,
         config = config_class.from_pretrained(model, revision=revision)
     
     # NOTE: DEBUG
-    config.num_hidden_layers = 1
+    if FORCE_SIGNLE_LAYER:
+        config.num_hidden_layers = 1
     
     return config

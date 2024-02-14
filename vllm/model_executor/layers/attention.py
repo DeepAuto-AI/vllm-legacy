@@ -20,6 +20,10 @@ _SUPPORTED_HEAD_SIZES = [64, 80, 96, 112, 128, 256]
 # Should be the same as PARTITION_SIZE in `paged_attention_v2_launcher`.
 _PARTITION_SIZE = 512
 
+from timber.models.timber_attention.attention1_block_gpu import paged_timber_attention
+from vllm.transformers_utils import config as vllm_transformers_config
+from timber.utils import get_bench 
+BENCHMARK_ITERATION = 0
 
 class PagedAttention(nn.Module):
     """MHA/MQA/GQA layer with PagedAttention.
@@ -69,6 +73,8 @@ class PagedAttention(nn.Module):
         value_cache: Optional[torch.Tensor],
         input_metadata: InputMetadata,
     ) -> torch.Tensor:
+        global BENCHMARK_ITERATION
+        
         """PagedAttention forward pass.
 
         Args:
@@ -181,8 +187,48 @@ class PagedAttention(nn.Module):
 
         else:
             # Decoding run.
+            BENCHMARK_PAGED_ATTENTION = os.environ.get('BENCHMARK_PAGED_ATTENTION', '0') == '1'
+            if BENCHMARK_PAGED_ATTENTION:
+                warnings.warn(f'query_size: {query.shape}, block_table: {input_metadata.block_tables.shape}[{input_metadata.max_context_len}/{input_metadata.max_seq_len}]')
+                torch.cuda.synchronize()
+                start = torch.cuda.Event(enable_timing=True)
+                end = torch.cuda.Event(enable_timing=True)
+                start.record()
+            
             backend = os.environ.get('PAGED_ATTENTION_BACKEND', 'vllm')
-            warnings.warn(f'query_size: {query.shape}, block_table: {input_metadata.block_tables.shape}[{input_metadata.max_context_len}/{input_metadata.max_seq_len}]')
+            if backend == 'vllm':
+                output = _paged_attention(
+                    query,
+                    key_cache,
+                    value_cache,
+                    input_metadata,
+                    self.num_kv_heads,
+                    self.scale,
+                    self.alibi_slopes,
+                )    
+            elif backend == 'timber':
+                output, _ = paged_timber_attention(
+                    q=query,
+                    q_scale=self.scale,
+                    k=key_cache,
+                    v=value_cache,
+                    block_tables=input_metadata.block_tables,
+                    context_lens=input_metadata.context_lens,
+                    max_context_len=input_metadata.max_context_len,
+                    attention_mask=None,
+                    mask_k=512,
+                    block_size_k=4,
+                    block_size_q=16
+                )
+                
+                N_H, _, HID = output.shape
+                N = query.shape[0]
+                H = N_H // N
+                output = output.view(N, H, HID)
+                # print('hello')
+            else:
+                raise Exception()
+            
             if os.environ.get('CHECKOUT', '0') == '1':
                 os.makedirs('./cache/llama', exist_ok=True)
                 inp = input(f'press y to store ({query.shape}, {input_metadata.block_tables.shape}) >>>').lower()
@@ -197,43 +243,11 @@ class PagedAttention(nn.Module):
                         "alibi_slopes": self.alibi_slopes,
                         "output": output,
                     }, 'cache/llama/vllmout.pth')
-
-            start = torch.cuda.Event(enable_timing=True)
-            end = torch.cuda.Event(enable_timing=True)
-            start.record()
             
-            if backend == 'vllm':
-                output = _paged_attention(
-                    query,
-                    key_cache,
-                    value_cache,
-                    input_metadata,
-                    self.num_kv_heads,
-                    self.scale,
-                    self.alibi_slopes,
-                )    
-            elif backend == 'timber':
-                from timber.models.timber_attention.attention1_block_gpu import paged_timber_attention
-                output, _ = paged_timber_attention(
-                    q=query,
-                    q_scale=self.scale,
-                    k=key_cache,
-                    v=value_cache,
-                    block_tables=input_metadata.block_tables,
-                    context_lens=input_metadata.context_lens,
-                    max_context_len=input_metadata.max_context_len,
-                    attention_mask=None,
-                    mask_k=512,
-                    block_size_k=4,
-                    block_size_q=16
-                )
-                # print('hello')
-            else:
-                raise Exception()
-            
-            end.record()
-            torch.cuda.synchronize()
-            print(start.elapsed_time(end))
+            if BENCHMARK_PAGED_ATTENTION:
+                end.record()
+                torch.cuda.synchronize()
+                print(start.elapsed_time(end))
 
         # Reshape the output tensor.
         return output.view(batch_size, seq_len, hidden_size)
