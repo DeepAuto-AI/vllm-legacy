@@ -207,6 +207,8 @@ class PagedAttention(nn.Module):
                     self.alibi_slopes,
                 )    
             elif backend == 'timber':
+                warnings.warn('backend is timber')
+                
                 output, _ = paged_timber_attention(
                     q=query,
                     q_scale=self.scale,
@@ -216,8 +218,8 @@ class PagedAttention(nn.Module):
                     context_lens=input_metadata.context_lens,
                     max_context_len=input_metadata.max_context_len,
                     attention_mask=None,
-                    mask_k=512,
-                    block_size_k=4,
+                    mask_k=1024,
+                    block_size_k=2,
                     block_size_q=16
                 )
                 
