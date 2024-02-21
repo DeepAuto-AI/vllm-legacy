@@ -46,6 +46,7 @@ class PagedAttention(nn.Module):
         num_kv_heads: Optional[int] = None,
         alibi_slopes: Optional[List[float]] = None,
         sliding_window: Optional[int] = None,
+        layer_index: Optional[int] = None,
     ) -> None:
         super().__init__()
         self.num_heads = num_heads
@@ -63,6 +64,8 @@ class PagedAttention(nn.Module):
         if self.head_size not in _SUPPORTED_HEAD_SIZES:
             raise ValueError(f"head_size ({self.head_size}) is not supported. "
                              f"Supported head sizes: {_SUPPORTED_HEAD_SIZES}.")
+        
+        self.layer_index = layer_index
 
     def forward(
         self,
@@ -188,6 +191,9 @@ class PagedAttention(nn.Module):
         else:
             # Decoding run.
             BENCHMARK_PAGED_ATTENTION = os.environ.get('BENCHMARK_PAGED_ATTENTION', '0') == '1'
+            
+            # print(f'[{os.getpid()}, {self.layer_index}] query_size: {query.shape}, block_table: {input_metadata.block_tables.shape}[{input_metadata.max_context_len}/{input_metadata.max_seq_len}]')
+            
             if BENCHMARK_PAGED_ATTENTION:
                 warnings.warn(f'query_size: {query.shape}, block_table: {input_metadata.block_tables.shape}[{input_metadata.max_context_len}/{input_metadata.max_seq_len}]')
                 torch.cuda.synchronize()
@@ -218,9 +224,9 @@ class PagedAttention(nn.Module):
                     context_lens=input_metadata.context_lens,
                     max_context_len=input_metadata.max_context_len,
                     attention_mask=None,
-                    mask_k=1024,
-                    block_size_k=2,
-                    block_size_q=16
+                    mask_k=512,
+                    block_size_k=4,
+                    block_size_q=32
                 )
                 
                 N_H, _, HID = output.shape
