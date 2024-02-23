@@ -342,10 +342,14 @@ class LlamaForCausalLM(nn.Module):
                 continue
             for (param_name, weight_name, shard_id) in stacked_params_mapping:
                 if weight_name not in name:
+                    # print('vllm.load_weight: ignore', weight_name)
                     continue
                 name = name.replace(weight_name, param_name)
                 # Skip loading extra bias for GPTQ models.
                 if name.endswith(".bias") and name not in params_dict:
+                    continue
+                if name not in params_dict:
+                    print('vllm.load_weight: ignore', name)
                     continue
                 param = params_dict[name]
                 weight_loader = param.weight_loader
@@ -354,6 +358,9 @@ class LlamaForCausalLM(nn.Module):
             else:
                 # Skip loading extra bias for GPTQ models.
                 if name.endswith(".bias") and name not in params_dict:
+                    continue
+                if name not in params_dict:
+                    print('vllm.load_weight: ignore', name)
                     continue
                 param = params_dict[name]
                 weight_loader = getattr(param, "weight_loader",

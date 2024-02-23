@@ -195,7 +195,7 @@ class PagedAttention(nn.Module):
             # print(f'[{os.getpid()}, {self.layer_index}] query_size: {query.shape}, block_table: {input_metadata.block_tables.shape}[{input_metadata.max_context_len}/{input_metadata.max_seq_len}]')
             
             if BENCHMARK_PAGED_ATTENTION:
-                warnings.warn(f'query_size: {query.shape}, block_table: {input_metadata.block_tables.shape}[{input_metadata.max_context_len}/{input_metadata.max_seq_len}]')
+                warnings.warn(f'query_size: {query.shape}({query.dtype}), block_table: {input_metadata.block_tables.shape}[{input_metadata.max_context_len}/{input_metadata.max_seq_len}]')
                 torch.cuda.synchronize()
                 start = torch.cuda.Event(enable_timing=True)
                 end = torch.cuda.Event(enable_timing=True)
@@ -255,7 +255,7 @@ class PagedAttention(nn.Module):
             if BENCHMARK_PAGED_ATTENTION:
                 end.record()
                 torch.cuda.synchronize()
-                print(start.elapsed_time(end))
+                print(f'({backend}) {start.elapsed_time(end)}', end='\r')
 
         # Reshape the output tensor.
         return output.view(batch_size, seq_len, hidden_size)
