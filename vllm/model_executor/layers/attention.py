@@ -211,7 +211,7 @@ class PagedAttention(nn.Module):
                     self.num_kv_heads,
                     self.scale,
                     self.alibi_slopes,
-                )    
+                )
             elif backend == 'timber':
                 warnings.warn('backend is timber')
                 
@@ -224,7 +224,7 @@ class PagedAttention(nn.Module):
                     context_lens=input_metadata.context_lens,
                     max_context_len=input_metadata.max_context_len,
                     attention_mask=None,
-                    mask_k=512,
+                    mask_k=1024,
                     block_size_k=4,
                     block_size_q=32
                 )
@@ -251,6 +251,7 @@ class PagedAttention(nn.Module):
                         "alibi_slopes": self.alibi_slopes,
                         "output": output,
                     }, 'cache/llama/vllmout.pth')
+                    print('saved cache/llama/vllmout.pth')
             
             if BENCHMARK_PAGED_ATTENTION:
                 end.record()
