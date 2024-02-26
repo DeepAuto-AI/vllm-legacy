@@ -225,8 +225,8 @@ class PagedAttention(nn.Module):
                     max_context_len=input_metadata.max_context_len,
                     attention_mask=None,
                     mask_k=1024,
-                    block_size_k=4,
-                    block_size_q=32
+                    block_size_k=2,
+                    block_size_q=16
                 )
                 
                 N_H, _, HID = output.shape
