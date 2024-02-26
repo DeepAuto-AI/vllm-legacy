@@ -17,8 +17,7 @@ RUN apt-get update -y \
     && apt-get install -y software-properties-common \
     && add-apt-repository ppa:deadsnakes/ppa -y \
     && apt-get update -y \
-    && apt-get install -y python3.8 python3.8-dev python3.8-venv python3-pip git \
-    && update-alternatives --install /usr/bin/python3 python3 /usr/bin/python3.8 1
+    && apt-get install -y python3 python3-dev python3-venv python3-pip git
 
 # Workaround for https://github.com/openai/triton/issues/2507 and
 # https://github.com/pytorch/pytorch/issues/107960 -- hopefully
@@ -76,8 +75,8 @@ RUN python3 setup.py build_ext --inplace
 FROM dev AS test
 
 # copy pytorch extensions separately to avoid having to rebuild
-# when python code changes
 WORKDIR /vllm-workspace
+# when python code changes
 # ADD is used to preserve directory structure
 ADD . /vllm-workspace/
 COPY --from=build /workspace/vllm/*.so /vllm-workspace/vllm/
@@ -89,7 +88,7 @@ RUN --mount=type=cache,target=/root/.cache/pip VLLM_USE_PRECOMPILED=1 pip instal
 
 #################### RUNTIME BASE IMAGE ####################
 # use CUDA base as CUDA runtime dependencies are already installed via pip
-FROM nvidia/cuda:12.1.0-base-ubuntu22.04 AS vllm-base
+FROM nvidia/cuda:12.1.0-devel-ubuntu22.04 AS vllm-base
 
 # libnccl required for ray
 RUN apt-get update -y \
@@ -108,6 +107,13 @@ FROM vllm-base AS vllm-openai
 # install additional dependencies for openai api server
 RUN --mount=type=cache,target=/root/.cache/pip \
     pip install accelerate
+
+# install timber
+RUN mkdir /workspace/timber
+COPY --from=timber timber /workspace/timber/timber
+COPY --from=timber setup.py /workspace/timber/setup.py
+RUN pip install -e /workspace/timber \
+    && pip install numba
 
 COPY --from=build /workspace/vllm/*.so /workspace/vllm/
 COPY vllm vllm
