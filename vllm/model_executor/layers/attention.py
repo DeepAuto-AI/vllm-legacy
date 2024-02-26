@@ -1,28 +1,26 @@
 """Multi-head attention."""
-from typing import List, Optional
+import os
 import warnings
+from typing import List, Optional
 
 import torch
 import torch.nn as nn
-from xformers import ops as xops
-from xformers.ops.fmha.attn_bias import (BlockDiagonalCausalMask,
-                                         LowerTriangularMaskWithTensorBias)
-
-import os
-from vllm._C import ops
 from vllm._C import cache_ops
+from vllm._C import ops
 from vllm.model_executor.input_metadata import InputMetadata
 from vllm.model_executor.layers.triton_kernel.prefix_prefill import (
     context_attention_fwd)
 from vllm.utils import is_hip
+from xformers import ops as xops
+from xformers.ops.fmha.attn_bias import (BlockDiagonalCausalMask,
+                                         LowerTriangularMaskWithTensorBias)
 
 _SUPPORTED_HEAD_SIZES = [64, 80, 96, 112, 128, 256]
 # Should be the same as PARTITION_SIZE in `paged_attention_v2_launcher`.
 _PARTITION_SIZE = 512
 
 from timber.models.timber_attention.attention1_block_gpu import paged_timber_attention
-from vllm.transformers_utils import config as vllm_transformers_config
-from timber.utils import get_bench 
+
 BENCHMARK_ITERATION = 0
 
 class PagedAttention(nn.Module):
