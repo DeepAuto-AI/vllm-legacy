@@ -117,9 +117,10 @@ class PagedAttention(nn.Module):
 
         if input_metadata.is_prompt:
             # Prompt run.
+            BENCHMARK_PROMPT_ATTENTION = os.environ.get('BENCHMARK_PAGED_ATTENTION', '0') == '1'
             backend = os.environ.get('PROMPT_ATTENTION_BACKEND', 'vllm')
             is_normal_attention = (key_cache is None) or (value_cache is None) or (input_metadata.block_tables.numel() == 0)
-            if backend == 'vllm' or (backend == 'timber' and ):
+            if backend == 'vllm':
                 if self.num_kv_heads != self.num_heads:
                     # As of Nov 2023, xformers only supports MHA. For MQA/GQA,
                     # project the key and value tensors to the desired number of
@@ -174,6 +175,11 @@ class PagedAttention(nn.Module):
                         key = key.unflatten(0, (batch_size, seq_len))
                         value = value.unflatten(0, (batch_size, seq_len))
 
+                    if BENCHMARK_PROMPT_ATTENTION:
+                        start = torch.cuda.Event(enable_timing=True)
+                        end = torch.cuda.Event(enable_timing=True)
+                        start.record()
+                    
                     out = xops.memory_efficient_attention_forward(
                         query,
                         key,
@@ -185,6 +191,11 @@ class PagedAttention(nn.Module):
                         (is_hip()) else None,
                     )
                     output = out.view_as(query)
+                    
+                    if BENCHMARK_PROMPT_ATTENTION:
+                        end.record()
+                        torch.cuda.synchronize()
+                        print(backend, start.elapsed_time(end), output.shape, end='\n')
                 else:
                     # prefix-enabled attention
                     output = torch.empty_like(query)
@@ -204,21 +215,47 @@ class PagedAttention(nn.Module):
                     )
             elif backend == 'timber':
                 # timber support MQA/GQA
-                output = timber_attention(
-                    q=query,
+                warnings.warn('prompt attention backend is timber')
+                
+                TDST, H, HID = query.shape
+                TSRC, H_KV, _HID = key.shape
+                assert key.shape[:-1] == value.shape[:-1]
+                assert HID == _HID
+                
+                query = query.permute(1, 0, 2)
+                key = key.permute(1, 0, 2)
+                value = value.permute(1, 0, 2)
+                
+                if BENCHMARK_PROMPT_ATTENTION:
+                    start = torch.cuda.Event(enable_timing=True)
+                    end = torch.cuda.Event(enable_timing=True)
+                    start.record()
+                
+                assert input_metadata.attn_bias is None
+                assert self.alibi_slopes is None
+                
+                output, _ = timber_attention(
+                    q=query * self.scale,
                     k=key,
                     v=value,
                     attention_mask=None,
-                    mask_k=1024,
+                    mask_k=512,
                     block_size_q=32,
                     block_size_k=4,
                 )
-                output.view(
-                    query.shape[0], 
-                    self.num_kv_heads,
-                    self.num_queries_per_kv, 
-                    query.shape[-1]
-                )
+                
+                output = output.permute(1, 0, 2)
+                output = output.view(
+                    1,
+                    TDST,
+                    H, 
+                    HID,
+                ).contiguous()
+                    
+                if BENCHMARK_PROMPT_ATTENTION:
+                    end.record()
+                    torch.cuda.synchronize()
+                    print(backend, start.elapsed_time(end), output.shape, end='\n')
             else:
                 raise Exception(backend)
         else:
@@ -246,7 +283,7 @@ class PagedAttention(nn.Module):
                     self.alibi_slopes,
                 )
             elif backend == 'timber':
-                warnings.warn('backend is timber')
+                warnings.warn('paged attention backend is timber')
                 
                 output, _ = paged_timber_attention(
                     q=query,
@@ -258,8 +295,8 @@ class PagedAttention(nn.Module):
                     max_context_len=input_metadata.max_context_len,
                     attention_mask=None,
                     mask_k=512,
+                    block_size_q=32,
                     block_size_k=4,
-                    block_size_q=16
                 )
                 
                 N_H, _, HID = output.shape
