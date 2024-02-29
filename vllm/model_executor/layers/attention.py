@@ -244,7 +244,7 @@ class PagedAttention(nn.Module):
                     self.num_kv_heads,
                     self.scale,
                     self.alibi_slopes,
-                )    
+                )
             elif backend == 'timber':
                 warnings.warn('backend is timber')
                 
@@ -259,7 +259,7 @@ class PagedAttention(nn.Module):
                     attention_mask=None,
                     mask_k=512,
                     block_size_k=4,
-                    block_size_q=32
+                    block_size_q=16
                 )
                 
                 N_H, _, HID = output.shape
@@ -284,6 +284,7 @@ class PagedAttention(nn.Module):
                         "alibi_slopes": self.alibi_slopes,
                         "output": output,
                     }, 'cache/llama/vllmout.pth')
+                    print('saved cache/llama/vllmout.pth')
             
             if BENCHMARK_PAGED_ATTENTION:
                 end.record()
