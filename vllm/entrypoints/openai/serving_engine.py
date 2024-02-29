@@ -116,7 +116,7 @@ class OpenAIServing:
                 "Only one of prompt or prompt_ids should be provided.")
 
         input_ids = prompt_ids if prompt_ids is not None else self.tokenizer(
-            prompt).input_ids
+            prompt, add_special_tokens=False).input_ids
         token_num = len(input_ids)
 
         if request.max_tokens is None:

@@ -1,7 +1,11 @@
+import re
 import time
 import codecs
+from io import BytesIO
+
 from fastapi import Request
 from typing import AsyncGenerator, AsyncIterator, Union
+
 from vllm.logger import init_logger
 from vllm.utils import random_uuid
 from vllm.engine.async_llm_engine import AsyncLLMEngine
@@ -12,6 +16,8 @@ from vllm.entrypoints.openai.protocol import (
     UsageInfo)
 from vllm.outputs import RequestOutput
 from vllm.entrypoints.openai.serving_engine import OpenAIServing
+
+from .make_prompt import make_prompt
 
 logger = init_logger(__name__)
 
@@ -50,10 +56,7 @@ class OpenAIServingChat(OpenAIServing):
                 "logit_bias is not currently supported")
 
         try:
-            prompt = self.tokenizer.apply_chat_template(
-                conversation=request.messages,
-                tokenize=False,
-                add_generation_prompt=request.add_generation_prompt)
+            prompt = make_prompt(request, self.tokenizer)
         except Exception as e:
             logger.error(
                 f"Error in applying chat template from request: {str(e)}")
