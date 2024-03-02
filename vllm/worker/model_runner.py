@@ -593,7 +593,7 @@ class ModelRunner:
             elapsed_sample = start_sample.elapsed_time(end_sample)
             elapsed_total = (time.time() - t_start) * 1000
             
-            print(f'prepare: {elapsed_prepare}, model: {elapsed_model}, sample: {elapsed_sample}, total: {elapsed_total}')
+            print(f'[{time.time() * 1000:.3f}] prepare: {elapsed_prepare:.3f}, model: {elapsed_model:.3f}, sample: {elapsed_sample:.3f}, total: {elapsed_total:.3f}')
         
         return output
 
