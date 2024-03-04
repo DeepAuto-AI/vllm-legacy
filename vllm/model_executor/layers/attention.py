@@ -241,7 +241,7 @@ class PagedAttention(nn.Module):
                     attention_mask=None,
                     mask_k=1024,
                     block_size_q=32,
-                    block_size_k=4,
+                    block_size_k=2,
                 )
                 
                 output = output.permute(1, 0, 2)
