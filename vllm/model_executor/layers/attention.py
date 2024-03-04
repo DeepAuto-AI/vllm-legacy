@@ -239,7 +239,7 @@ class PagedAttention(nn.Module):
                     k=key,
                     v=value,
                     attention_mask=None,
-                    mask_k=512,
+                    mask_k=1024,
                     block_size_q=32,
                     block_size_k=4,
                 )
@@ -294,7 +294,7 @@ class PagedAttention(nn.Module):
                     context_lens=input_metadata.context_lens,
                     max_context_len=input_metadata.max_context_len,
                     attention_mask=None,
-                    mask_k=512,
+                    mask_k=1024,
                     block_size_q=32,
                     block_size_k=4,
                 )
