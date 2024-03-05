@@ -306,7 +306,9 @@ class YaRNScalingRotaryEmbedding(RotaryEmbedding):
         # Get n-d rotational scaling corrected for extrapolation
         inv_freq_mask = (1 - _yarn_linear_ramp_mask(
             low, high, self.rotary_dim // 2,
-            dtype=torch.float)) * self.extrapolation_factor
+            dtype=torch.float,
+            device=pos_freqs.device
+        )) * self.extrapolation_factor
         inv_freq = inv_freq_interpolation * (
             1 - inv_freq_mask) + inv_freq_extrapolation * inv_freq_mask
         return inv_freq
