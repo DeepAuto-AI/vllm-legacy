@@ -126,6 +126,7 @@ class Worker:
         torch.cuda.synchronize()
         free_gpu_memory, total_gpu_memory = torch.cuda.mem_get_info()
         peak_memory = total_gpu_memory - free_gpu_memory
+        print(f"Peak memory: {peak_memory / 1024**2:.2f} MB")
 
         cache_block_size = CacheEngine.get_cache_block_size(
             block_size, cache_dtype, self.model_config, self.parallel_config)
