@@ -114,6 +114,8 @@ class PagedAttention(nn.Module):
                 input_metadata.slot_mapping.flatten(),
                 input_metadata.kv_cache_dtype,
             )
+        
+        hip_k = int(os.environ.get('HIP_K', '1024'))
 
         if input_metadata.is_prompt:
             # Prompt run.
@@ -239,7 +241,7 @@ class PagedAttention(nn.Module):
                     k=key,
                     v=value,
                     attention_mask=None,
-                    mask_k=1024,
+                    mask_k=hip_k,
                     block_size_q=32,
                     block_size_k=2,
                 )
@@ -294,7 +296,7 @@ class PagedAttention(nn.Module):
                     context_lens=input_metadata.context_lens,
                     max_context_len=input_metadata.max_context_len,
                     attention_mask=None,
-                    mask_k=1024,
+                    mask_k=hip_k,
                     block_size_q=32,
                     block_size_k=2,
                 )
