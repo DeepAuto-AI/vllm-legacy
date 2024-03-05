@@ -16,7 +16,7 @@ _CONFIG_REGISTRY = {
 }
 
 # NOTE: For benchmarking
-FORCE_SIGNLE_LAYER = False
+FORCE_SIGNLE_LAYER = 0
 
 def get_config(
     model: str,
@@ -44,7 +44,8 @@ def get_config(
         config = config_class.from_pretrained(model, revision=revision)
     
     # NOTE: DEBUG
-    if FORCE_SIGNLE_LAYER:
-        config.num_hidden_layers = 1
+    if FORCE_SIGNLE_LAYER > 0:
+        assert isinstance(FORCE_SIGNLE_LAYER, int)
+        config.num_hidden_layers = FORCE_SIGNLE_LAYER
     
     return config

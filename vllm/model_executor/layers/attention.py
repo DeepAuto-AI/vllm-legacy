@@ -44,6 +44,7 @@ class PagedAttention(nn.Module):
         num_kv_heads: Optional[int] = None,
         alibi_slopes: Optional[List[float]] = None,
         sliding_window: Optional[int] = None,
+        layer_index: Optional[int] = None,
     ) -> None:
         super().__init__()
         self.num_heads = num_heads
@@ -61,6 +62,8 @@ class PagedAttention(nn.Module):
         if self.head_size not in _SUPPORTED_HEAD_SIZES:
             raise ValueError(f"head_size ({self.head_size}) is not supported. "
                              f"Supported head sizes: {_SUPPORTED_HEAD_SIZES}.")
+        
+        self.layer_index = layer_index
 
     def forward(
         self,
@@ -186,8 +189,11 @@ class PagedAttention(nn.Module):
         else:
             # Decoding run.
             BENCHMARK_PAGED_ATTENTION = os.environ.get('BENCHMARK_PAGED_ATTENTION', '0') == '1'
+            
+            # print(f'[{os.getpid()}, {self.layer_index}] query_size: {query.shape}, block_table: {input_metadata.block_tables.shape}[{input_metadata.max_context_len}/{input_metadata.max_seq_len}]')
+            
             if BENCHMARK_PAGED_ATTENTION:
-                warnings.warn(f'query_size: {query.shape}, block_table: {input_metadata.block_tables.shape}[{input_metadata.max_context_len}/{input_metadata.max_seq_len}]')
+                warnings.warn(f'query_size: {query.shape}({query.dtype}), block_table: {input_metadata.block_tables.shape}[{input_metadata.max_context_len}/{input_metadata.max_seq_len}]')
                 torch.cuda.synchronize()
                 start = torch.cuda.Event(enable_timing=True)
                 end = torch.cuda.Event(enable_timing=True)
@@ -203,7 +209,7 @@ class PagedAttention(nn.Module):
                     self.num_kv_heads,
                     self.scale,
                     self.alibi_slopes,
-                )    
+                )
             elif backend == 'timber':
                 warnings.warn('backend is timber')
                 
@@ -243,11 +249,12 @@ class PagedAttention(nn.Module):
                         "alibi_slopes": self.alibi_slopes,
                         "output": output,
                     }, 'cache/llama/vllmout.pth')
+                    print('saved cache/llama/vllmout.pth')
             
             if BENCHMARK_PAGED_ATTENTION:
                 end.record()
                 torch.cuda.synchronize()
-                print(start.elapsed_time(end))
+                print(f'({backend}) {start.elapsed_time(end)}', end='\r')
 
         # Reshape the output tensor.
         return output.view(batch_size, seq_len, hidden_size)
