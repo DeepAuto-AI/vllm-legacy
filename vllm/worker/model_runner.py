@@ -1,3 +1,4 @@
+import os
 import time
 from typing import Dict, List, Optional, Tuple, Set, Union
 
@@ -534,13 +535,35 @@ class ModelRunner:
         seq_group_metadata_list: Optional[List[SequenceGroupMetadata]],
         kv_caches: List[Tuple[torch.Tensor, torch.Tensor]],
     ) -> Optional[SamplerOutput]:
-        (input_tokens, input_positions, input_metadata, sampling_metadata,
-         lora_requests,
-         lora_mapping) = self.prepare_input_tensors(seq_group_metadata_list)
+        BENCHMARK_RUNNER = os.environ.get('BENCHMARK_RUNNER', '0') == '1'
+        
+        if BENCHMARK_RUNNER:
+            t_start = time.time()
+            
+            start_prepare = torch.cuda.Event(enable_timing=True)
+            end_prepare = torch.cuda.Event(enable_timing=True)
+            
+            start_model = torch.cuda.Event(enable_timing=True)
+            end_model = torch.cuda.Event(enable_timing=True)
+            
+            start_sample = torch.cuda.Event(enable_timing=True)
+            end_sample = torch.cuda.Event(enable_timing=True)
+            
+        if BENCHMARK_RUNNER: start_prepare.record()
+        (
+            input_tokens, 
+            input_positions, 
+            input_metadata, 
+            sampling_metadata, 
+            lora_requests,
+            lora_mapping
+        ) = self.prepare_input_tensors(seq_group_metadata_list)
+        if BENCHMARK_RUNNER: end_prepare.record()
 
         if self.lora_config:
             self.set_active_loras(lora_requests, lora_mapping)
 
+        if BENCHMARK_RUNNER: start_model.record()
         # Execute the model.
         if input_metadata.use_cuda_graph:
             graph_batch_size = input_tokens.shape[0]
@@ -553,12 +576,25 @@ class ModelRunner:
             kv_caches=kv_caches,
             input_metadata=input_metadata,
         )
+        if BENCHMARK_RUNNER: end_model.record()
 
         # Sample the next token.
+        if BENCHMARK_RUNNER: start_sample.record()
         output = self.model.sample(
             hidden_states=hidden_states,
             sampling_metadata=sampling_metadata,
         )
+        if BENCHMARK_RUNNER: end_sample.record()
+        
+        if BENCHMARK_RUNNER: 
+            torch.cuda.synchronize()
+            elapsed_prepare = start_prepare.elapsed_time(end_prepare)
+            elapsed_model = start_model.elapsed_time(end_model)
+            elapsed_sample = start_sample.elapsed_time(end_sample)
+            elapsed_total = (time.time() - t_start) * 1000
+            
+            print(f'[{time.time() * 1000:.3f}] prepare: {elapsed_prepare:.3f}, model: {elapsed_model:.3f}, sample: {elapsed_sample:.3f}, total: {elapsed_total:.3f}')
+        
         return output
 
     @torch.inference_mode()
