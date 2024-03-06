@@ -70,7 +70,7 @@ class PagedAttention(nn.Module):
         
         self.layer_index = layer_index
         assert layer_index is not None, 'layer index should be not none'
-        self.hip_dense_layers = [0, 1, 2]
+        self.hip_dense_layers = list(range(int(os.environ.get('HIP_DENSE_LAYERS', '3'))))
         self.hip_high_k_layers = {
             0: None,
             1: None,
