@@ -82,15 +82,18 @@ class Qwen2MLP(nn.Module):
 
 class Qwen2Attention(nn.Module):
 
-    def __init__(self,
-                 hidden_size: int,
-                 num_heads: int,
-                 num_kv_heads: int,
-                 max_position: int = 4096 * 32,
-                 rope_theta: float = 10000,
-                 use_sliding_window: bool = False,
-                 linear_method: Optional[LinearMethodBase] = None,
-                 sliding_window: Optional[int] = None) -> None:
+    def __init__(
+        self,
+        hidden_size: int,
+        num_heads: int,
+        num_kv_heads: int,
+        max_position: int = 4096 * 32,
+        rope_theta: float = 10000,
+        use_sliding_window: bool = False,
+        linear_method: Optional[LinearMethodBase] = None,
+        sliding_window: Optional[int] = None,
+        layer_index: Optional[int] = None,
+    ) -> None:
         super().__init__()
         self.hidden_size = hidden_size
         tp_size = get_tensor_model_parallel_world_size()
@@ -135,11 +138,14 @@ class Qwen2Attention(nn.Module):
             max_position=max_position,
             base=self.rope_theta,
         )
-        self.attn = PagedAttention(self.num_heads,
-                                   self.head_dim,
-                                   self.scaling,
-                                   num_kv_heads=self.num_kv_heads,
-                                   sliding_window=self.sliding_window)
+        self.attn = PagedAttention(
+            self.num_heads,
+            self.head_dim,
+            self.scaling,
+            num_kv_heads=self.num_kv_heads,
+            sliding_window=self.sliding_window,
+            layer_index=layer_index,
+        )
 
     def forward(
         self,
@@ -178,7 +184,9 @@ class Qwen2DecoderLayer(nn.Module):
             rope_theta=rope_theta,
             use_sliding_window=use_sliding_window,
             linear_method=linear_method,
-            sliding_window=config.sliding_window)
+            sliding_window=config.sliding_window,
+            layer_index=layer_idx
+        )
         self.mlp = Qwen2MLP(
             hidden_size=self.hidden_size,
             intermediate_size=config.intermediate_size,
