@@ -71,11 +71,7 @@ class PagedAttention(nn.Module):
         self.layer_index = layer_index
         assert layer_index is not None, 'layer index should be not none'
         self.hip_dense_layers = list(range(int(os.environ.get('HIP_DENSE_LAYERS', '3'))))
-        self.hip_high_k_layers = {
-            0: None,
-            1: None,
-            2: None,
-        }
+        self.hip_high_k_layers = {}
 
     def forward(
         self,
@@ -125,10 +121,10 @@ class PagedAttention(nn.Module):
         hip_k = int(os.environ.get('HIP_K', '1024'))
         
         benchmark_prompt_attention = os.environ.get('BENCHMARK_PAGED_ATTENTION', '0') == '1'
-        prompt_backend = os.environ.get('PROMPT_ATTENTION_BACKEND', 'vllm')
+        prompt_backend = os.environ.get('PROMPT_ATTENTION_BACKEND', 'timber')
         
         benchmark_paged_attention = os.environ.get('BENCHMARK_PAGED_ATTENTION', '0') == '1'
-        paged_backend = os.environ.get('PAGED_ATTENTION_BACKEND', 'vllm')
+        paged_backend = os.environ.get('PAGED_ATTENTION_BACKEND', 'timber')
         
         if self.layer_index in self.hip_dense_layers:
             prompt_backend = 'vllm'
