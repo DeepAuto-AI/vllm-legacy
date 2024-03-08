@@ -1,6 +1,8 @@
+import os
 from typing import Optional
 
 from transformers import AutoConfig, PretrainedConfig
+from vllm.logger import init_logger
 
 from vllm.transformers_utils.configs import *
 
@@ -14,6 +16,8 @@ _CONFIG_REGISTRY = {
     "RefinedWebModel": RWConfig,  # For tiiuae/falcon-7b(-instruct)
     "yi": YiConfig,
 }
+
+logger = init_logger(__name__)
 
 # NOTE: For benchmarking
 FORCE_SIGNLE_LAYER = 0
@@ -47,5 +51,9 @@ def get_config(
     if FORCE_SIGNLE_LAYER > 0:
         assert isinstance(FORCE_SIGNLE_LAYER, int)
         config.num_hidden_layers = FORCE_SIGNLE_LAYER
+    
+    if 'timber' in [os.getenv('PAGED_ATTENTION_BACKEND', 'timber'), os.getenv('PROMPT_ATTENTION_BACKEND', 'timber')] and hasattr(config, 'sliding_window'):
+        logger.info(f'sliding window ({config.sliding_window}) disabled -> {config.max_position_embeddings}')
+        config.sliding_window = config.max_position_embeddings
     
     return config
