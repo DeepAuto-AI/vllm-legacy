@@ -162,14 +162,17 @@ class MixtralMoE(nn.Module):
 
 class MixtralAttention(nn.Module):
 
-    def __init__(self,
-                 hidden_size: int,
-                 num_heads: int,
-                 num_kv_heads: int,
-                 max_position: int = 4096 * 32,
-                 rope_theta: float = 10000,
-                 linear_method: Optional[LinearMethodBase] = None,
-                 sliding_window: Optional[int] = None) -> None:
+    def __init__(
+        self,
+        hidden_size: int,
+        num_heads: int,
+        num_kv_heads: int,
+        max_position: int = 4096 * 32,
+        rope_theta: float = 10000,
+        linear_method: Optional[LinearMethodBase] = None,
+        sliding_window: Optional[int] = None,
+        layer_index: Optional[int] = None,
+    ) -> None:
         super().__init__()
         self.hidden_size = hidden_size
         tp_size = get_tensor_model_parallel_world_size()
@@ -220,6 +223,7 @@ class MixtralAttention(nn.Module):
             self.scaling,
             num_kv_heads=self.num_kv_heads,
             sliding_window=self.sliding_window,
+            layer_index=layer_index,
         )
 
     def forward(
@@ -239,11 +243,11 @@ class MixtralAttention(nn.Module):
 
 
 class MixtralDecoderLayer(nn.Module):
-
     def __init__(
         self,
         config: MixtralConfig,
         linear_method: Optional[LinearMethodBase] = None,
+        layer_index: Optional[int] = None,
     ) -> None:
         super().__init__()
         self.hidden_size = config.hidden_size
@@ -256,7 +260,9 @@ class MixtralDecoderLayer(nn.Module):
             num_kv_heads=config.num_key_value_heads,
             rope_theta=rope_theta,
             sliding_window=config.sliding_window,
-            linear_method=linear_method)
+            linear_method=linear_method,
+            layer_index=layer_index,
+        )
         self.block_sparse_moe = MixtralMoE(config=config,
                                            linear_method=linear_method)
         self.input_layernorm = RMSNorm(config.hidden_size,
@@ -309,8 +315,12 @@ class MixtralModel(nn.Module):
             config.hidden_size,
         )
         self.layers = nn.ModuleList([
-            MixtralDecoderLayer(config, linear_method=linear_method)
-            for _ in range(config.num_hidden_layers)
+            MixtralDecoderLayer(
+                config, 
+                linear_method=linear_method,
+                layer_index=layer_index,
+            )
+            for layer_index in range(config.num_hidden_layers)
         ])
         self.norm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
 
