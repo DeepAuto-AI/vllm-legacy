@@ -17,7 +17,11 @@ def numel(shape):
 cudaMemAdviseSetReadMostly = 1
 cudaMemAdviseUnsetReadMostly = 2
 cudaMemAdviseSetPreferredLocation = 3
+cudaMemAdviseUnsetPreferredLocation = 4
 cudaMemAdviseSetAccessedBy = 5
+cudaMemAdviseUnsetAccessedBy = 6
+
+cudaCpuDeviceId = -1
 
 class ManagedTensor:
     def __init__(self, shape, dtype, byte_size, device):
@@ -36,14 +40,22 @@ class ManagedTensor:
         
         self.managed_ptr = cp.cuda.malloc_managed(self.byte_size) #type: cp.cuda.MemoryPointer
         self.data_ptr = lambda: self.managed_ptr.ptr
+        tensor = cp.ndarray((self.byte_size,), dtype=cp.uint8, memptr=self.managed_ptr)
+        tensor[:] = 0
         
-        logger.info(f'managed allocated {self.data_ptr():02X}')
+        logger.info(f'managed allocated {self.data_ptr():02X} {self.byte_size:,}')
 
     def readonly_start(self):
-        cp.cuda.runtime.memAdvise(self.data_ptr(), self.byte_size, cudaMemAdviseSetReadMostly, 0)
+        pass
+        cp.cuda.runtime.memAdvise(self.data_ptr(), self.byte_size, cudaMemAdviseSetPreferredLocation, cudaCpuDeviceId)
+        # cp.cuda.runtime.memAdvise(self.data_ptr(), self.byte_size, cudaMemAdviseSetAccessedBy, 0)
+        # cp.cuda.runtime.memAdvise(self.data_ptr(), self.byte_size, cudaMemAdviseSetReadMostly, 0)
     
     def readonly_end(self):
-        cp.cuda.runtime.memAdvise(self.data_ptr(), self.byte_size, cudaMemAdviseUnsetReadMostly, 0)
+        pass
+        cp.cuda.runtime.memAdvise(self.data_ptr(), self.byte_size, cudaMemAdviseUnsetPreferredLocation, cudaCpuDeviceId)
+        # cp.cuda.runtime.memAdvise(self.data_ptr(), self.byte_size, cudaMemAdviseUnsetAccessedBy, 0)
+        # cp.cuda.runtime.memAdvise(self.data_ptr(), self.byte_size, cudaMemAdviseUnsetReadMostly, 0)
 
     def numel(self):
         return numel(self.shape)
@@ -72,7 +84,7 @@ class MapCacheEngine(CacheEngine):
                     byte_size=_get_dtype_size(self.dtype) * numel((self.num_gpu_blocks, *value_block_shape)),
                     device='cuda',
                 )
-            logger.info(f'layer {layer_index} key: {key_blocks.shape}[{key_blocks.numel():,}] value: {value_blocks.shape}[{value_blocks.numel():,}]; {self.num_gpu_blocks // self.model_config.max_model_len}')
+            logger.info(f'layer {layer_index} key: {key_blocks.shape}[{key_blocks.numel():,}] value: {value_blocks.shape}[{value_blocks.numel():,}]; {(self.num_gpu_blocks * 16) // self.model_config.max_model_len}')
             gpu_cache.append((key_blocks, value_blocks))
         return gpu_cache
     

@@ -86,7 +86,7 @@ class CacheEngine:
                 dtype=self.dtype,
                 device="cuda",
             )
-            logger.info(f'layer {_} key: {key_blocks.shape}[{key_blocks.numel():,}] value: {value_blocks.shape}[{value_blocks.numel():,}]; {self.num_gpu_blocks // self.model_config.max_model_len}')
+            logger.info(f'layer {_} key: {key_blocks.shape}[{key_blocks.numel():,}] value: {value_blocks.shape}[{value_blocks.numel():,}]; {(16 * self.num_gpu_blocks) // self.model_config.max_model_len}')
             gpu_cache.append((key_blocks, value_blocks))
         return gpu_cache
 

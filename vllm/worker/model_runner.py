@@ -565,6 +565,15 @@ class ModelRunner:
 
         if BENCHMARK_RUNNER: start_model.record()
         # Execute the model.
+        is_prompt = input_tokens.shape[-1] > 1
+        
+        if not is_prompt:
+            for k_cache, v_cache in kv_caches:
+                if hasattr(k_cache, 'readonly_start'):
+                    k_cache.readonly_start()
+                if hasattr(v_cache, 'readonly_start'):
+                    v_cache.readonly_start()
+        
         if input_metadata.use_cuda_graph:
             graph_batch_size = input_tokens.shape[0]
             model_executable = self.graph_runners[graph_batch_size]
@@ -576,6 +585,14 @@ class ModelRunner:
             kv_caches=kv_caches,
             input_metadata=input_metadata,
         )
+        
+        if not is_prompt:
+            for k_cache, v_cache in kv_caches:
+                if hasattr(k_cache, 'readonly_end'):
+                    k_cache.readonly_end()
+                if hasattr(v_cache, 'readonly_end'):
+                    v_cache.readonly_end()
+        
         if BENCHMARK_RUNNER: end_model.record()
 
         # Sample the next token.

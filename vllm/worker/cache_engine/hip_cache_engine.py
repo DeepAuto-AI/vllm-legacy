@@ -57,6 +57,6 @@ class HipCacheEngine(CacheEngine):
                 self.num_gpu_blocks,
                 value_block_shape
             )
-            logger.info(f'layer {layer_index} key: {key_blocks.shape}[{key_blocks.numel():,}] value: {value_blocks.shape}[{value_blocks.numel():,}]; {self.num_gpu_blocks // self.model_config.max_model_len}')
+            logger.info(f'layer {layer_index} key: {key_blocks.shape}[{key_blocks.numel():,}] value: {value_blocks.shape}[{value_blocks.numel():,}]; {(self.num_gpu_blocks * 16) // self.model_config.max_model_len}')
             gpu_cache.append((key_blocks, value_blocks))
         return gpu_cache
