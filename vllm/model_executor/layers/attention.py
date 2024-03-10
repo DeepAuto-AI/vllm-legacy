@@ -68,6 +68,9 @@ class PagedAttention(nn.Module):
                              f"Supported head sizes: {_SUPPORTED_HEAD_SIZES}.")
         
         self.layer_index = layer_index
+        assert layer_index is not None, 'layer index should be not none'
+        self.hip_dense_layers = list(range(int(os.environ.get('HIP_DENSE_LAYERS', '3'))))
+        self.hip_high_k_layers = {}
 
     def forward(
         self,
@@ -115,13 +118,24 @@ class PagedAttention(nn.Module):
             )
         
         hip_k = int(os.environ.get('HIP_K', '1024'))
+        
+        benchmark_prompt_attention = os.environ.get('BENCHMARK_PAGED_ATTENTION', '0') == '1'
+        prompt_backend = os.environ.get('PROMPT_ATTENTION_BACKEND', 'timber')
+        
+        benchmark_paged_attention = os.environ.get('BENCHMARK_PAGED_ATTENTION', '0') == '1'
+        paged_backend = os.environ.get('PAGED_ATTENTION_BACKEND', 'timber')
+        
+        if self.layer_index in self.hip_dense_layers:
+            prompt_backend = 'vllm'
+            paged_backend = 'vllm'
+        
+        if (paged_backend == 'timber' or prompt_backend == 'timber') and (self.layer_index in self.hip_high_k_layers):
+            hip_k *= self.hip_high_k_layers[self.layer_index]
 
         if input_metadata.is_prompt:
             # Prompt run.
-            BENCHMARK_PROMPT_ATTENTION = os.environ.get('BENCHMARK_PAGED_ATTENTION', '0') == '1'
-            backend = os.environ.get('PROMPT_ATTENTION_BACKEND', 'vllm')
             is_normal_attention = (key_cache is None) or (value_cache is None) or (input_metadata.block_tables.numel() == 0)
-            if backend == 'vllm':
+            if prompt_backend == 'vllm':
                 if self.num_kv_heads != self.num_heads:
                     # As of Nov 2023, xformers only supports MHA. For MQA/GQA,
                     # project the key and value tensors to the desired number of
@@ -176,7 +190,7 @@ class PagedAttention(nn.Module):
                         key = key.unflatten(0, (batch_size, seq_len))
                         value = value.unflatten(0, (batch_size, seq_len))
 
-                    if BENCHMARK_PROMPT_ATTENTION:
+                    if benchmark_prompt_attention:
                         start = torch.cuda.Event(enable_timing=True)
                         end = torch.cuda.Event(enable_timing=True)
                         start.record()
@@ -193,10 +207,10 @@ class PagedAttention(nn.Module):
                     )
                     output = out.view_as(query)
                     
-                    if BENCHMARK_PROMPT_ATTENTION:
+                    if benchmark_prompt_attention:
                         end.record()
                         torch.cuda.synchronize()
-                        print(backend, start.elapsed_time(end), output.shape, end='\n')
+                        print(prompt_backend, start.elapsed_time(end), output.shape, end='\n')
                 else:
                     # prefix-enabled attention
                     output = torch.empty_like(query)
@@ -214,8 +228,7 @@ class PagedAttention(nn.Module):
                         input_metadata.max_seq_len,
                         getattr(self, "alibi_slopes", None),
                     )
-            elif backend == 'timber':
-                # timber support MQA/GQA
+            elif prompt_backend == 'timber':
                 warnings.warn('prompt attention backend is timber')
                 
                 TDST, H, HID = query.shape
@@ -227,12 +240,12 @@ class PagedAttention(nn.Module):
                 key = key.permute(1, 0, 2)
                 value = value.permute(1, 0, 2)
                 
-                if BENCHMARK_PROMPT_ATTENTION:
+                if benchmark_prompt_attention:
                     start = torch.cuda.Event(enable_timing=True)
                     end = torch.cuda.Event(enable_timing=True)
                     start.record()
                 
-                assert input_metadata.attn_bias is None
+                assert (input_metadata.attn_bias is None) or isinstance(input_metadata.attn_bias, BlockDiagonalCausalMask), f'{input_metadata.attn_bias}'
                 assert self.alibi_slopes is None
                 
                 output, _ = timber_attention(
@@ -253,27 +266,25 @@ class PagedAttention(nn.Module):
                     HID,
                 ).contiguous()
                     
-                if BENCHMARK_PROMPT_ATTENTION:
+                if benchmark_prompt_attention:
                     end.record()
                     torch.cuda.synchronize()
-                    print(backend, start.elapsed_time(end), output.shape, end='\n')
+                    print(prompt_backend, start.elapsed_time(end), output.shape, end='\n')
             else:
-                raise Exception(backend)
+                raise Exception(prompt_backend)
         else:
             # Decoding run.
-            BENCHMARK_PAGED_ATTENTION = os.environ.get('BENCHMARK_PAGED_ATTENTION', '0') == '1'
             
             # print(f'[{os.getpid()}, {self.layer_index}] query_size: {query.shape}, block_table: {input_metadata.block_tables.shape}[{input_metadata.max_context_len}/{input_metadata.max_seq_len}]')
             
-            if BENCHMARK_PAGED_ATTENTION:
+            if benchmark_paged_attention:
                 warnings.warn(f'query_size: {query.shape}({query.dtype}), block_table: {input_metadata.block_tables.shape}[{input_metadata.max_context_len}/{input_metadata.max_seq_len}]')
                 torch.cuda.synchronize()
                 start = torch.cuda.Event(enable_timing=True)
                 end = torch.cuda.Event(enable_timing=True)
                 start.record()
             
-            backend = os.environ.get('PAGED_ATTENTION_BACKEND', 'vllm')
-            if backend == 'vllm':
+            if paged_backend == 'vllm':
                 output = _paged_attention(
                     query,
                     key_cache,
@@ -283,7 +294,7 @@ class PagedAttention(nn.Module):
                     self.scale,
                     self.alibi_slopes,
                 )
-            elif backend == 'timber':
+            elif paged_backend == 'timber':
                 warnings.warn('paged attention backend is timber')
                 
                 output, _ = paged_timber_attention(
@@ -324,10 +335,10 @@ class PagedAttention(nn.Module):
                     }, 'cache/llama/vllmout.pth')
                     print('saved cache/llama/vllmout.pth')
             
-            if BENCHMARK_PAGED_ATTENTION:
+            if benchmark_paged_attention:
                 end.record()
                 torch.cuda.synchronize()
-                print(f'({backend}) {start.elapsed_time(end)}', end='\r')
+                print(f'({paged_backend}) {start.elapsed_time(end)}', end='\r')
 
         # Reshape the output tensor.
         return output.view(batch_size, seq_len, hidden_size)

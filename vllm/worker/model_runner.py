@@ -710,6 +710,7 @@ class ModelRunner:
 
         # NOTE: Capturing the largest batch size first may help reduce the
         # memory usage of CUDA graph.
+        logger.info(f'graph will capture batches {batch_size_capture_list}')
         with custom_all_reduce.capture():
             for batch_size in reversed(batch_size_capture_list):
                 # Create dummy input_metadata.
