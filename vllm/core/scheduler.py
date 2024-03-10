@@ -106,6 +106,8 @@ class Scheduler:
         self.running: Deque[SequenceGroup] = deque()
         # Sequence groups in the SWAPPED state.
         self.swapped: Deque[SequenceGroup] = deque()
+        
+        logger.info(f'scheduler max_seq {self.scheduler_config.max_num_seqs}')
 
     @property
     def lora_enabled(self) -> bool:
