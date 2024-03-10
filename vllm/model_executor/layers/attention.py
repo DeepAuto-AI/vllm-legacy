@@ -442,7 +442,7 @@ def _paged_attention(
             tmp_output,
             query,
             key_cache,
-            value_cache,
+            str(value_cache.data_ptr()),
             num_kv_heads,
             scale,
             input_metadata.block_tables,

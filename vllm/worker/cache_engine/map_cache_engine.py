@@ -14,6 +14,11 @@ def numel(shape):
         size *= i
     return size
 
+cudaMemAdviseSetReadMostly = 1
+cudaMemAdviseUnsetReadMostly = 2
+cudaMemAdviseSetPreferredLocation = 3
+cudaMemAdviseSetAccessedBy = 5
+
 class ManagedTensor:
     def __init__(self, shape, dtype, byte_size, device):
         self.shape = shape
@@ -34,6 +39,12 @@ class ManagedTensor:
         
         logger.info(f'managed allocated {self.data_ptr():02X}')
 
+    def readonly_start(self):
+        cp.cuda.runtime.memAdvise(self.data_ptr(), self.byte_size, cudaMemAdviseSetReadMostly, 0)
+    
+    def readonly_end(self):
+        cp.cuda.runtime.memAdvise(self.data_ptr(), self.byte_size, cudaMemAdviseUnsetReadMostly, 0)
+
     def numel(self):
         return numel(self.shape)
 
@@ -48,7 +59,7 @@ class MapCacheEngine(CacheEngine):
                 dtype=self.dtype,
                 device="cuda",
             )
-            if layer_index < int(os.getenv('DENSE_LAYERS', '3')):
+            if layer_index < int(os.getenv('HIP_DENSE_LAYERS', '3')):
                 value_blocks = torch.empty(
                     size=(self.num_gpu_blocks, *value_block_shape),
                     dtype=self.dtype,

@@ -17,17 +17,17 @@ void paged_attention_v1(
   const std::string& kv_cache_dtype);
 
 void paged_attention_v2(
-  torch::Tensor& out,
-  torch::Tensor& exp_sums,
-  torch::Tensor& max_logits,
-  torch::Tensor& tmp_out,
-  torch::Tensor& query,
-  torch::Tensor& key_cache,
-  torch::Tensor& value_cache,
-  int num_kv_heads,
+  torch::Tensor& out,             // [num_seqs, num_heads, head_size]
+  torch::Tensor& exp_sums,        // [num_seqs, num_heads, max_num_partitions]
+  torch::Tensor& max_logits,      // [num_seqs, num_heads, max_num_partitions]
+  torch::Tensor& tmp_out,         // [num_seqs, num_heads, max_num_partitions, head_size]
+  torch::Tensor& query,           // [num_seqs, num_heads, head_size]
+  torch::Tensor& key_cache,       // [num_blocks, num_heads, head_size/x, block_size, x]
+  const std::string& value_cache_data_ptr_str,     // [num_blocks, num_heads, head_size, block_size]
+  int num_kv_heads,               // [num_heads]
   float scale,
-  torch::Tensor& block_tables,
-  torch::Tensor& context_lens,
+  torch::Tensor& block_tables,    // [num_seqs, max_num_blocks_per_seq]
+  torch::Tensor& context_lens,    // [num_seqs]
   int block_size,
   int max_context_len,
   const c10::optional<torch::Tensor>& alibi_slopes,

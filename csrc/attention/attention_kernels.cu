@@ -796,7 +796,7 @@ void paged_attention_v2_launcher(
   torch::Tensor& tmp_out,
   torch::Tensor& query,
   torch::Tensor& key_cache,
-  torch::Tensor& value_cache,
+  const std::string& value_cache_data_ptr_str,
   int num_kv_heads,
   float scale,
   torch::Tensor& block_tables,
@@ -825,7 +825,7 @@ void paged_attention_v2_launcher(
   T* tmp_out_ptr = reinterpret_cast<T*>(tmp_out.data_ptr());
   T* query_ptr = reinterpret_cast<T*>(query.data_ptr());
   CACHE_T* key_cache_ptr = reinterpret_cast<CACHE_T*>(key_cache.data_ptr());
-  CACHE_T* value_cache_ptr = reinterpret_cast<CACHE_T*>(value_cache.data_ptr());
+  CACHE_T* value_cache_ptr = reinterpret_cast<CACHE_T*>(std::stoull(value_cache_data_ptr_str));
   int* block_tables_ptr = block_tables.data_ptr<int>();
   int* context_lens_ptr = context_lens.data_ptr<int>();
 
@@ -880,7 +880,7 @@ void paged_attention_v2_launcher(
     tmp_out,                                                                     \
     query,                                                                       \
     key_cache,                                                                   \
-    value_cache,                                                                 \
+    value_cache_data_ptr_str,                                                                 \
     num_kv_heads,                                                                \
     scale,                                                                       \
     block_tables,                                                                \
@@ -913,7 +913,7 @@ void paged_attention_v2(
   torch::Tensor& tmp_out,         // [num_seqs, num_heads, max_num_partitions, head_size]
   torch::Tensor& query,           // [num_seqs, num_heads, head_size]
   torch::Tensor& key_cache,       // [num_blocks, num_heads, head_size/x, block_size, x]
-  torch::Tensor& value_cache,     // [num_blocks, num_heads, head_size, block_size]
+  const std::string& value_cache_data_ptr_str,     // [num_blocks, num_heads, head_size, block_size]
   int num_kv_heads,               // [num_heads]
   float scale,
   torch::Tensor& block_tables,    // [num_seqs, max_num_blocks_per_seq]
