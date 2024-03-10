@@ -109,11 +109,12 @@ class PagedAttention(nn.Module):
         # vectors will not be cached. This happens during the initial memory
         # profiling run.
         if key_cache is not None and value_cache is not None:
+            # print(f'py"{value_cache.data_ptr():X}"')
             cache_ops.reshape_and_cache(
                 key,
                 value,
                 key_cache,
-                value_cache,
+                str(value_cache.data_ptr()),
                 input_metadata.slot_mapping.flatten(),
                 input_metadata.kv_cache_dtype,
             )

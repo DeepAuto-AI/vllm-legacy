@@ -16,11 +16,11 @@ void copy_blocks(
   const std::map<int64_t, std::vector<int64_t>>& block_mapping);
 
 void reshape_and_cache(
-  torch::Tensor& key,
-  torch::Tensor& value,
-  torch::Tensor& key_cache,
-  torch::Tensor& value_cache,
-  torch::Tensor& slot_mapping,
+  torch::Tensor& key,           // [num_tokens, num_heads, head_size]
+  torch::Tensor& value,         // [num_tokens, num_heads, head_size]
+  torch::Tensor& key_cache,     // [num_blocks, num_heads, head_size/x, block_size, x]
+  const std::string& value_cache_data_ptr_str,   // [num_blocks, num_heads, head_size, block_size]
+  torch::Tensor& slot_mapping,  // [num_tokens]
   const std::string& kv_cache_dtype);
 
 void gather_cached_kv(

@@ -12,6 +12,7 @@
 #include <cassert>
 #include <map>
 #include <vector>
+#include <cstdio>
 
 #ifdef USE_ROCM
   #include <hip/hip_bf16.h>
@@ -216,7 +217,7 @@ __global__ void reshape_and_cache_kernel(
     reinterpret_cast<KV_T*>(key.data_ptr()),                                                       \
     reinterpret_cast<KV_T*>(value.data_ptr()),                                                     \
     reinterpret_cast<CACHE_T*>(key_cache.data_ptr()),                                              \
-    reinterpret_cast<CACHE_T*>(value_cache.data_ptr()),                                            \
+    reinterpret_cast<CACHE_T*>(value_cache_data_ptr),                                            \
     slot_mapping.data_ptr<int64_t>(),                                                              \
     key_stride,                                                                                    \
     value_stride,                                                                                  \
@@ -229,10 +230,13 @@ void reshape_and_cache(
   torch::Tensor& key,           // [num_tokens, num_heads, head_size]
   torch::Tensor& value,         // [num_tokens, num_heads, head_size]
   torch::Tensor& key_cache,     // [num_blocks, num_heads, head_size/x, block_size, x]
-  torch::Tensor& value_cache,   // [num_blocks, num_heads, head_size, block_size]
+  const std::string& value_cache_data_ptr_str,   // [num_blocks, num_heads, head_size, block_size]
   torch::Tensor& slot_mapping,  // [num_tokens]
   const std::string& kv_cache_dtype)
 {
+  size_t value_cache_data_ptr = std::stoull(value_cache_data_ptr_str);
+  // printf("%zx\n", value_cache_data_ptr);
+
   int num_tokens = key.size(0);
   int num_heads = key.size(1);
   int head_size = key.size(2);

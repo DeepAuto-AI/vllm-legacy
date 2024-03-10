@@ -102,9 +102,11 @@ class LLMEngine:
 
         self._init_tokenizer()
         self.seq_counter = Counter()
+        logger.info('tokenizer initialized')
 
         # Create the parallel GPU workers.
         if self.parallel_config.worker_use_ray:
+            logger.info('using ray cluster')
             # Disable Ray usage stats collection.
             ray_usage = os.environ.get("RAY_USAGE_STATS_ENABLED", "0")
             if ray_usage != "1":
@@ -112,12 +114,15 @@ class LLMEngine:
             self._init_workers_ray(placement_group)
         else:
             self._init_workers()
+        logger.info('worker initialized')
 
         # Profile the memory usage and initialize the cache.
         self._init_cache()
+        logger.info('cache initialized')
 
         # Create the scheduler.
         self.scheduler = Scheduler(scheduler_config, cache_config, lora_config)
+        logger.info('scheduler initialized')
 
         # Metric Logging.
         if self.log_stats:
@@ -136,8 +141,7 @@ class LLMEngine:
             "Ray is required if parallel_config.world_size > 1.")
 
         self.workers: List[Worker] = []
-        distributed_init_method = get_distributed_init_method(
-            get_ip(), get_open_port())
+        distributed_init_method = get_distributed_init_method(get_ip(), get_open_port())
         self.driver_worker = Worker(
             self.model_config,
             self.parallel_config,

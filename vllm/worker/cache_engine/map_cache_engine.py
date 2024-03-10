@@ -1,3 +1,4 @@
+import os
 import torch
 
 import numpy as np
@@ -7,39 +8,60 @@ from .cache_engine import CacheConfig, CacheEngine, KVCache, init_logger, ModelC
 
 logger = init_logger(__name__)
 
+def numel(shape):
+    size = 1
+    for i in shape:
+        size *= i
+    return size
+
 class ManagedTensor:
-    def __init__(self, shape, dtype, byte_size):
+    def __init__(self, shape, dtype, byte_size, device):
         self.shape = shape
         self.byte_size = byte_size
         self.dtype = dtype
+        self.device = torch.device(device)
+        
+        self._stride = [1]
+        for i in range(len(self.shape) - 1):
+            j = len(self.shape) - i - 1
+            self._stride.append(self._stride[-1] * self.shape[j])
+        self._stride.reverse()
+        self._stride = tuple(self._stride)
+        self.stride = lambda: self._stride
         
         self.managed_ptr = cp.cuda.malloc_managed(self.byte_size) #type: cp.cuda.MemoryPointer
         self.data_ptr = lambda: self.managed_ptr.ptr
-        logger.info(f'managed allocated {self.data_ptr:02X}')
+        
+        logger.info(f'managed allocated {self.data_ptr():02X}')
 
     def numel(self):
-        size = 1
-        for i in self.shape:
-            size *= i
-        return size
+        return numel(self.shape)
 
 class MapCacheEngine(CacheEngine):
     def allocate_gpu_cache(self) -> List[KVCache]:
         gpu_cache: List[KVCache] = []
         key_block_shape = self.get_key_block_shape()
         value_block_shape = self.get_value_block_shape()
-        for _ in range(self.num_layers):
+        for layer_index in range(self.num_layers):
             key_blocks = torch.empty(
                 size=(self.num_gpu_blocks, *key_block_shape),
                 dtype=self.dtype,
                 device="cuda",
             )
-            value_blocks = ManagedTensor(
-                shape=(self.num_gpu_blocks, *value_block_shape),
-                dtype=self.dtype,
-                byte_size=_get_dtype_size(self.dtype) * key_blocks.numel(),
-            )
-            logger.info(f'layer {_} key: {key_blocks.shape}[{key_blocks.numel():,}] value: {value_blocks.shape}[{value_blocks.numel():,}]; {self.num_gpu_blocks // self.model_config.max_model_len}')
+            if layer_index < int(os.getenv('DENSE_LAYERS', '3')):
+                value_blocks = torch.empty(
+                    size=(self.num_gpu_blocks, *value_block_shape),
+                    dtype=self.dtype,
+                    device="cuda",
+                )
+            else:
+                value_blocks = ManagedTensor(
+                    shape=(self.num_gpu_blocks, *value_block_shape),
+                    dtype=self.dtype,
+                    byte_size=_get_dtype_size(self.dtype) * numel((self.num_gpu_blocks, *value_block_shape)),
+                    device='cuda',
+                )
+            logger.info(f'layer {layer_index} key: {key_blocks.shape}[{key_blocks.numel():,}] value: {value_blocks.shape}[{value_blocks.numel():,}]; {self.num_gpu_blocks // self.model_config.max_model_len}')
             gpu_cache.append((key_blocks, value_blocks))
         return gpu_cache
     
