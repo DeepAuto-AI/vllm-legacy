@@ -216,7 +216,7 @@ __global__ void reshape_and_cache_kernel(
   vllm::reshape_and_cache_kernel<KV_T, CACHE_T, IS_FP8_E5M2_KV_CACHE><<<grid, block, 0, stream>>>( \
     reinterpret_cast<KV_T*>(key.data_ptr()),                                                       \
     reinterpret_cast<KV_T*>(value.data_ptr()),                                                     \
-    reinterpret_cast<CACHE_T*>(key_cache.data_ptr()),                                              \
+    reinterpret_cast<CACHE_T*>(key_cache_data_ptr),                                              \
     reinterpret_cast<CACHE_T*>(value_cache_data_ptr),                                            \
     slot_mapping.data_ptr<int64_t>(),                                                              \
     key_stride,                                                                                    \
@@ -229,19 +229,25 @@ __global__ void reshape_and_cache_kernel(
 void reshape_and_cache(
   torch::Tensor& key,           // [num_tokens, num_heads, head_size]
   torch::Tensor& value,         // [num_tokens, num_heads, head_size]
-  torch::Tensor& key_cache,     // [num_blocks, num_heads, head_size/x, block_size, x]
+  // torch::Tensor& key_cache,     // [num_blocks, num_heads, head_size/x, block_size, x]
+  const std::string& key_cache_data_ptr_str,
+  int key_cache_block_size,
+  int key_cache_x,
   const std::string& value_cache_data_ptr_str,   // [num_blocks, num_heads, head_size, block_size]
   torch::Tensor& slot_mapping,  // [num_tokens]
   const std::string& kv_cache_dtype)
 {
   size_t value_cache_data_ptr = std::stoull(value_cache_data_ptr_str);
+  size_t key_cache_data_ptr = std::stoull(key_cache_data_ptr_str);
   // printf("%zx\n", value_cache_data_ptr);
 
   int num_tokens = key.size(0);
   int num_heads = key.size(1);
   int head_size = key.size(2);
-  int block_size = key_cache.size(3);
-  int x = key_cache.size(4);
+  // int block_size = key_cache.size(3);
+  // int x = key_cache.size(4);
+  int block_size = key_cache_block_size;
+  int x = key_cache_x;
 
   int key_stride = key.stride(0);
   int value_stride = value.stride(0);

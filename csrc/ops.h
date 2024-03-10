@@ -22,7 +22,10 @@ void paged_attention_v2(
   torch::Tensor& max_logits,      // [num_seqs, num_heads, max_num_partitions]
   torch::Tensor& tmp_out,         // [num_seqs, num_heads, max_num_partitions, head_size]
   torch::Tensor& query,           // [num_seqs, num_heads, head_size]
-  torch::Tensor& key_cache,       // [num_blocks, num_heads, head_size/x, block_size, x]
+  // torch::Tensor& key_cache,       // [num_blocks, num_heads, head_size/x, block_size, x]
+  const std::string& key_cache_data_ptr_str,
+  int key_cache_stride_0,
+  int key_cache_stride_1,
   const std::string& value_cache_data_ptr_str,     // [num_blocks, num_heads, head_size, block_size]
   int num_kv_heads,               // [num_heads]
   float scale,

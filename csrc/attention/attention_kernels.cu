@@ -795,7 +795,11 @@ void paged_attention_v2_launcher(
   torch::Tensor& max_logits,
   torch::Tensor& tmp_out,
   torch::Tensor& query,
-  torch::Tensor& key_cache,
+  // torch::Tensor& key_cache,
+  const std::string& key_cache_data_ptr_str,
+  int key_cache_stride_0,
+  int key_cache_stride_1,
+
   const std::string& value_cache_data_ptr_str,
   int num_kv_heads,
   float scale,
@@ -808,8 +812,8 @@ void paged_attention_v2_launcher(
   int head_size = query.size(2);
   int max_num_blocks_per_seq = block_tables.size(1);
   int q_stride = query.stride(0);
-  int kv_block_stride = key_cache.stride(0);
-  int kv_head_stride = key_cache.stride(1);
+  int kv_block_stride = key_cache_stride_0;
+  int kv_head_stride = key_cache_stride_1;
 
   int thread_group_size = MAX(WARP_SIZE / BLOCK_SIZE, 1);
   assert(head_size % thread_group_size == 0);
@@ -824,7 +828,7 @@ void paged_attention_v2_launcher(
   float* max_logits_ptr = reinterpret_cast<float*>(max_logits.data_ptr());
   T* tmp_out_ptr = reinterpret_cast<T*>(tmp_out.data_ptr());
   T* query_ptr = reinterpret_cast<T*>(query.data_ptr());
-  CACHE_T* key_cache_ptr = reinterpret_cast<CACHE_T*>(key_cache.data_ptr());
+  CACHE_T* key_cache_ptr = reinterpret_cast<CACHE_T*>(std::stoull(key_cache_data_ptr_str));
   CACHE_T* value_cache_ptr = reinterpret_cast<CACHE_T*>(std::stoull(value_cache_data_ptr_str));
   int* block_tables_ptr = block_tables.data_ptr<int>();
   int* context_lens_ptr = context_lens.data_ptr<int>();
@@ -879,8 +883,10 @@ void paged_attention_v2_launcher(
     max_logits,                                                                  \
     tmp_out,                                                                     \
     query,                                                                       \
-    key_cache,                                                                   \
-    value_cache_data_ptr_str,                                                                 \
+    key_cache_data_ptr_str,                                                      \
+    key_cache_stride_0,                                                          \
+    key_cache_stride_1,                                                          \
+    value_cache_data_ptr_str,                                                    \
     num_kv_heads,                                                                \
     scale,                                                                       \
     block_tables,                                                                \
@@ -912,7 +918,10 @@ void paged_attention_v2(
   torch::Tensor& max_logits,      // [num_seqs, num_heads, max_num_partitions]
   torch::Tensor& tmp_out,         // [num_seqs, num_heads, max_num_partitions, head_size]
   torch::Tensor& query,           // [num_seqs, num_heads, head_size]
-  torch::Tensor& key_cache,       // [num_blocks, num_heads, head_size/x, block_size, x]
+  // torch::Tensor& key_cache,       // [num_blocks, num_heads, head_size/x, block_size, x]
+  const std::string& key_cache_data_ptr_str,
+  int key_cache_stride_0,
+  int key_cache_stride_1,
   const std::string& value_cache_data_ptr_str,     // [num_blocks, num_heads, head_size, block_size]
   int num_kv_heads,               // [num_heads]
   float scale,
@@ -921,7 +930,8 @@ void paged_attention_v2(
   int block_size,
   int max_context_len,
   const c10::optional<torch::Tensor>& alibi_slopes,
-  const std::string& kv_cache_dtype) {
+  const std::string& kv_cache_dtype) 
+{
   if (kv_cache_dtype == "auto") {
     if (query.dtype() == at::ScalarType::Float) {
       CALL_V2_LAUNCHER_BLOCK_SIZE(float, float, false);

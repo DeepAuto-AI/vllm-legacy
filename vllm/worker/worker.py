@@ -126,12 +126,19 @@ class Worker:
         torch.cuda.synchronize()
         free_gpu_memory, total_gpu_memory = torch.cuda.mem_get_info()
         peak_memory = total_gpu_memory - free_gpu_memory
+        if os.getenv('MEASURE_PEAK_MEMORY', '1') == '0':
+            peak_memory = 0
 
         cache_block_size = CacheEngine.get_cache_block_size(
             block_size, cache_dtype, self.model_config, self.parallel_config)
         num_gpu_blocks = int(
             (total_gpu_memory * gpu_memory_utilization - peak_memory) //
-            cache_block_size)
+            cache_block_size
+        )
+        num_gpu_blocks = min(
+            num_gpu_blocks,
+            self.scheduler_config.max_num_seqs * self.model_config.max_context_len_to_capture // block_size
+        )
         num_cpu_blocks = int(cpu_swap_space // cache_block_size)
         num_gpu_blocks = max(num_gpu_blocks, 0)
         num_cpu_blocks = max(num_cpu_blocks, 0)

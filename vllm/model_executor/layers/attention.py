@@ -113,7 +113,9 @@ class PagedAttention(nn.Module):
             cache_ops.reshape_and_cache(
                 key,
                 value,
-                key_cache,
+                str(key_cache.data_ptr()),
+                key_cache.shape[3],
+                key_cache.shape[4],
                 str(value_cache.data_ptr()),
                 input_metadata.slot_mapping.flatten(),
                 input_metadata.kv_cache_dtype,
@@ -405,6 +407,8 @@ def _paged_attention(
     # For context len > 8192, use V2 kernel to avoid shared memory shortage.
     use_v1 = input_metadata.max_context_len <= 8192 and (
         max_num_partitions == 1 or num_seqs * num_heads > 512)
+    if os.getenv('CACHE_ENGINE', 'vllm') in ['map_kv', 'map']:
+        use_v1 = False
     if use_v1:
         # Run PagedAttention V1.
         ops.paged_attention_v1(
@@ -441,7 +445,9 @@ def _paged_attention(
             max_logits,
             tmp_output,
             query,
-            key_cache,
+            str(key_cache.data_ptr()),
+            key_cache.stride()[0],
+            key_cache.stride()[1],
             str(value_cache.data_ptr()),
             num_kv_heads,
             scale,

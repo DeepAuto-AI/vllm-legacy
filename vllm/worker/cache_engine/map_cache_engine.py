@@ -61,17 +61,43 @@ class ManagedTensor:
         return numel(self.shape)
 
 class MapCacheEngine(CacheEngine):
+    def __init__(
+        self, 
+        cache_config: CacheConfig,
+        model_config: ModelConfig,
+        parallel_config: ParallelConfig,
+        k_offload: bool = False,
+        v_offload: bool = True,
+    ) -> None:
+        self.k_offload = k_offload
+        self.v_offload = v_offload
+        
+        super().__init__(cache_config, model_config, parallel_config)
+    
     def allocate_gpu_cache(self) -> List[KVCache]:
+        num_dense_layer = int(os.getenv('HIP_DENSE_LAYERS', '3'))
+        
         gpu_cache: List[KVCache] = []
+        
         key_block_shape = self.get_key_block_shape()
         value_block_shape = self.get_value_block_shape()
+        
         for layer_index in range(self.num_layers):
-            key_blocks = torch.empty(
-                size=(self.num_gpu_blocks, *key_block_shape),
-                dtype=self.dtype,
-                device="cuda",
-            )
-            if layer_index < int(os.getenv('HIP_DENSE_LAYERS', '3')):
+            if (layer_index < num_dense_layer) or (not self.k_offload):
+                key_blocks = torch.empty(
+                    size=(self.num_gpu_blocks, *key_block_shape),
+                    dtype=self.dtype,
+                    device="cuda",
+                )
+            else:
+                key_blocks = ManagedTensor(
+                    shape=(self.num_gpu_blocks, *key_block_shape),
+                    dtype=self.dtype,
+                    byte_size=_get_dtype_size(self.dtype) * numel((self.num_gpu_blocks, *key_block_shape)),
+                    device='cuda',
+                )
+            
+            if (layer_index < num_dense_layer) or (not self.v_offload):
                 value_blocks = torch.empty(
                     size=(self.num_gpu_blocks, *value_block_shape),
                     dtype=self.dtype,
@@ -84,6 +110,7 @@ class MapCacheEngine(CacheEngine):
                     byte_size=_get_dtype_size(self.dtype) * numel((self.num_gpu_blocks, *value_block_shape)),
                     device='cuda',
                 )
+            
             logger.info(f'layer {layer_index} key: {key_blocks.shape}[{key_blocks.numel():,}] value: {value_blocks.shape}[{value_blocks.numel():,}]; {(self.num_gpu_blocks * 16) // self.model_config.max_model_len}')
             gpu_cache.append((key_blocks, value_blocks))
         return gpu_cache
@@ -94,17 +121,55 @@ class MapCacheEngine(CacheEngine):
         cache_dtype: str,
         model_config: ModelConfig,
         parallel_config: ParallelConfig,
+        k_offload: bool,
+        v_offload: bool,
     ) -> int:
+        num_dense_layer = int(os.getenv('HIP_DENSE_LAYERS', '3'))
+        
         head_size = model_config.get_head_size()
         num_heads = model_config.get_num_kv_heads(parallel_config)
         num_layers = model_config.get_num_layers(parallel_config)
+        num_cached_layers = num_layers - num_dense_layer
 
-        key_cache_block = block_size * num_heads * head_size
-        value_cache_block = 0 # stored in CPU always
-        total = num_layers * (key_cache_block + value_cache_block)
+        dense_key_cache_block = key_cache_block = block_size * num_heads * head_size
+        dense_value_cache_block = value_cache_block = key_cache_block
+        
+        if k_offload:
+            key_cache_block = 0
+        if v_offload:
+            value_cache_block = 0
+        
+        total = num_cached_layers * (key_cache_block + value_cache_block) + num_dense_layer * (dense_key_cache_block + dense_value_cache_block)
         if cache_dtype == "auto":
             dtype = model_config.dtype
         else:
             dtype = STR_DTYPE_TO_TORCH_DTYPE[cache_dtype]
         dtype_size = _get_dtype_size(dtype)
-        return dtype_size * total
+        return max(1, dtype_size * total)
+        # return 0
+
+class VMapCacheEngine(MapCacheEngine):
+    def __init__(
+        self, 
+        cache_config: CacheConfig, 
+        model_config: ModelConfig, 
+        parallel_config: ParallelConfig
+    ) -> None:
+        super().__init__(cache_config, model_config, parallel_config, False, True)
+    
+    @staticmethod
+    def get_cache_block_size(block_size: int, cache_dtype: str, model_config: ModelConfig, parallel_config: ParallelConfig) -> int:
+        return MapCacheEngine.get_cache_block_size(block_size, cache_dtype, model_config, parallel_config, False, True)
+    
+class KVMapCacheEngine(MapCacheEngine):
+    def __init__(
+        self, 
+        cache_config: CacheConfig, 
+        model_config: ModelConfig, 
+        parallel_config: ParallelConfig
+    ) -> None:
+        super().__init__(cache_config, model_config, parallel_config, True, True)
+    
+    @staticmethod
+    def get_cache_block_size(block_size: int, cache_dtype: str, model_config: ModelConfig, parallel_config: ParallelConfig) -> int:
+        return MapCacheEngine.get_cache_block_size(block_size, cache_dtype, model_config, parallel_config, True, True)
