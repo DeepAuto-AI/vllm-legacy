@@ -22,6 +22,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 """Inference-only Qwen2 model compatible with HuggingFace weights."""
+import os
 from typing import List, Optional, Tuple
 
 import torch
@@ -146,7 +147,8 @@ class Qwen2Attention(nn.Module):
             sliding_window=self.sliding_window,
             layer_index=layer_index,
         )
-
+        self.rope_method = os.getenv('HIP_ROPE_METHOD', 'none')
+    
     def forward(
         self,
         positions: torch.Tensor,
@@ -154,11 +156,35 @@ class Qwen2Attention(nn.Module):
         kv_cache: KVCache,
         input_metadata: InputMetadata,
     ) -> torch.Tensor:
+        # qkv, _ = self.qkv_proj(hidden_states)
+        # q, k, v = qkv.split([self.q_size, self.kv_size, self.kv_size], dim=-1)
+        # q, k = self.rotary_emb(positions, q, k)
+        # k_cache, v_cache = kv_cache
+        # attn_output = self.attn(q, k, v, k_cache, v_cache, input_metadata)
+        # output, _ = self.o_proj(attn_output)
+        # return output
+        
         qkv, _ = self.qkv_proj(hidden_states)
         q, k, v = qkv.split([self.q_size, self.kv_size, self.kv_size], dim=-1)
-        q, k = self.rotary_emb(positions, q, k)
         k_cache, v_cache = kv_cache
-        attn_output = self.attn(q, k, v, k_cache, v_cache, input_metadata)
+        
+        if self.rope_method == 'none':
+            q, k = self.rotary_emb(positions, q, k)
+            attn_output = self.attn(q, k, v, k_cache, v_cache, input_metadata, rope_method=self.rope_method)
+        elif self.rope_method == 'self_extend':
+            cos, sin = self.rotary_emb.get_cos_sin_cache()
+            position_ids = positions
+            attn_output = self.attn(
+                q, k, v, k_cache, v_cache, input_metadata,
+                
+                rope_method=self.rope_method,
+                rope_cos=cos,
+                rope_sin=sin,
+                position_ids=position_ids,
+            )
+        else:
+            raise Exception()
+        
         output, _ = self.o_proj(attn_output)
         return output
 

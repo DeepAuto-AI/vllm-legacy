@@ -10,11 +10,11 @@ cache_engine_method = os.getenv('CACHE_ENGINE', 'vllm')
 
 if cache_engine_method == 'vllm':
     CacheEngine = VllmCacheEngine
-elif cache_engine_method == 'map':
+elif cache_engine_method == 'offload_v':
     CacheEngine = VMapCacheEngine
-elif cache_engine_method == 'map_kv':
+elif cache_engine_method == 'offload_kv':
     CacheEngine = KVMapCacheEngine
 elif cache_engine_method == 'hip':
     CacheEngine = HipCacheEngine
 else:
-    raise Exception()
+    raise Exception('supported: vllm, offload_v, offload_kv, hip')

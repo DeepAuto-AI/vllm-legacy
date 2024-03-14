@@ -23,6 +23,7 @@
 """Rotary Positional Embeddings."""
 import math
 from typing import Any, Dict, Optional, Tuple, Union
+import warnings
 
 import torch
 import torch.nn as nn
@@ -64,6 +65,8 @@ class RotaryEmbedding(nn.Module):
         cache = self._compute_cos_sin_cache()
         cache = cache.to(torch.get_default_dtype())
         self.register_buffer("cos_sin_cache", cache, persistent=False)
+        self.register_buffer("cos_cache", None, persistent=False)
+        self.register_buffer("sin_cache", None, persistent=False)
 
     def _compute_inv_freq(self, base: Union[int, float]) -> torch.Tensor:
         """Compute the inverse frequency."""
@@ -89,8 +92,28 @@ class RotaryEmbedding(nn.Module):
         cos = freqs.cos()
         sin = freqs.sin()
         cache = torch.cat((cos, sin), dim=-1)
-        return cache
+        warnings.warn('ainl: i am monkey, i need fp8 for rope. should work? idk')
+        return cache#.to(torch.float8_e5m2)
 
+    def get_cos_sin_cache(self) -> Tuple[torch.Tensor, torch.Tensor]:
+        if self.cos_cache is not None:
+            assert self.sin_cache is not None
+            return self.cos_cache, self.sin_cache
+        
+        cos_sin = self.cos_sin_cache
+        cos, sin = cos_sin.chunk(2, dim=-1)
+        if self.is_neox_style:
+            cos = cos.repeat(1, 2)
+            sin = sin.repeat(1, 2)
+        else:
+            assert False, "should be neox"
+            cos = cos.repeat_interleave(2, dim=-1).unsqueeze(-2)
+            sin = sin.repeat_interleave(2, dim=-1).unsqueeze(-2)
+        self.cos_cache = cos#.to(torch.float8_e5m2)
+        self.sin_cache = sin#.to(torch.float8_e5m2)
+        
+        return self.get_cos_sin_cache()
+    
     def _forward(
         self,
         positions: torch.Tensor,

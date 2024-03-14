@@ -43,7 +43,7 @@ class ManagedTensor:
         tensor = cp.ndarray((self.byte_size,), dtype=cp.uint8, memptr=self.managed_ptr)
         tensor[:] = 0
         
-        logger.info(f'managed allocated {self.data_ptr():02X} {self.byte_size:,}')
+        logger.info(f'managed allocated {self.data_ptr():02X} {self.byte_size:,} bytes')
 
     def readonly_start(self):
         pass
@@ -111,7 +111,7 @@ class MapCacheEngine(CacheEngine):
                     device='cuda',
                 )
             
-            logger.info(f'layer {layer_index} key: {key_blocks.shape}[{key_blocks.numel():,}] value: {value_blocks.shape}[{value_blocks.numel():,}]; {(self.num_gpu_blocks * 16) // self.model_config.max_model_len}')
+            logger.info(f'layer {layer_index} key: {key_blocks.shape}[{key_blocks.numel():,}] value: {value_blocks.shape}[{value_blocks.numel():,}]. Expected Max Batch: {(self.num_gpu_blocks * 16) // self.model_config.max_model_len}')
             gpu_cache.append((key_blocks, value_blocks))
         return gpu_cache
     

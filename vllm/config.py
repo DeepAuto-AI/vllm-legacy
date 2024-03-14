@@ -1,6 +1,7 @@
 from typing import Optional, Union, ClassVar
 from dataclasses import dataclass
 import os
+import warnings
 from packaging.version import Version
 
 import torch
@@ -105,8 +106,9 @@ class ModelConfig:
 
         self.hf_config = get_config(self.model, trust_remote_code, revision)
         self.dtype = _get_and_verify_dtype(self.hf_config, dtype)
-        self.max_model_len = _get_and_verify_max_len(self.hf_config,
-                                                     max_model_len)
+        self.max_model_len = _get_and_verify_max_len(
+            self.hf_config, max_model_len, True
+        )
         self._verify_load_format()
         self._verify_tokenizer_mode()
         self._verify_quantization()
@@ -566,6 +568,7 @@ def _get_and_verify_dtype(
 def _get_and_verify_max_len(
     hf_config: PretrainedConfig,
     max_model_len: Optional[int],
+    allow_extend: bool = False,
 ) -> int:
     """Get and verify the model's maximum length."""
     derived_max_model_len = float("inf")
@@ -612,10 +615,14 @@ def _get_and_verify_max_len(
     if max_model_len is None:
         max_model_len = derived_max_model_len
     elif max_model_len > derived_max_model_len:
-        raise ValueError(
-            f"User-specified max_model_len ({max_model_len}) is greater than "
-            f"the derived max_model_len ({max_len_key}={derived_max_model_len}"
-            " in model's config.json). This may lead to incorrect model "
-            "outputs or CUDA errors. Make sure the value is correct and "
-            "within the model context size.")
+        if allow_extend:
+            warnings.warn(f'this is kind reminder! you exceed the model pre-trained seq-len ({derived_max_model_len}), and try to set {max_model_len}.')
+            hf_config.max_position_embeddings = max_model_len
+        else:
+            raise ValueError(
+                f"User-specified max_model_len ({max_model_len}) is greater than "
+                f"the derived max_model_len ({max_len_key}={derived_max_model_len}"
+                " in model's config.json). This may lead to incorrect model "
+                "outputs or CUDA errors. Make sure the value is correct and "
+                "within the model context size.")
     return int(max_model_len)
