@@ -13,7 +13,8 @@ void swap_blocks(
 void copy_blocks(
   std::vector<torch::Tensor>& key_caches,
   std::vector<torch::Tensor>& value_caches,
-  const std::map<int64_t, std::vector<int64_t>>& block_mapping);
+  const std::map<int64_t, std::vector<int64_t>>& block_mapping
+);
 
 void reshape_and_cache(
   torch::Tensor& key,           // [num_tokens, num_heads, head_size]
@@ -24,16 +25,11 @@ void reshape_and_cache(
   int key_cache_x,
   const std::string& value_cache_data_ptr_str,   // [num_blocks, num_heads, head_size, block_size]
   torch::Tensor& slot_mapping,  // [num_tokens]
-  const std::string& kv_cache_dtype);
-
-void gather_cached_kv(
-  torch::Tensor& key,
-  torch::Tensor& value,
-  torch::Tensor& key_cache,
-  torch::Tensor& value_cache,
-  torch::Tensor& slot_mapping);
+  const std::string& kv_cache_dtype
+);
 
 // Just for unittest
 void convert_fp8_e5m2(
   torch::Tensor& src_cache,
-  torch::Tensor& dst_cache);
+  torch::Tensor& dst_cache
+);
