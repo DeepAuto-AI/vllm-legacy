@@ -1,6 +1,7 @@
 from typing import List, Optional
 
 import torch
+import os
 
 from vllm._C import cache_ops
 from vllm._C import ops

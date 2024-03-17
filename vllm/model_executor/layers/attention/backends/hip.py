@@ -11,6 +11,10 @@ from vllm.model_executor.layers.attention.ops.paged_attn import (
     PagedAttentionImpl
 )
 from timber import paged_timber_attention, timber_attention
+from xformers.ops.fmha.attn_bias import (
+    BlockDiagonalCausalMask, 
+    LowerTriangularMaskWithTensorBias
+)
 
 class HipAttentionBackend:
     def __init__(
@@ -116,11 +120,15 @@ class HipAttentionBackend:
         if self.layer_index in self.hip_dense_layers:
             prompt_backend = 'vllm'
             paged_backend = 'vllm'
+            
+            if rope_method == 'self_extend':
+                paged_backend = 'hip'
+            if rope_method == 'self_extend':
+                prompt_backend = 'hip'
         
         if rope_method == 'self_extend':
-            paged_backend = 'hip'
-        if rope_method == 'self_extend':
-            prompt_backend = 'hip'
+            assert paged_backend == 'hip'
+            assert prompt_backend == 'hip'
         
         has_high_k = (self.layer_index in self.hip_high_k_layers)
         has_self_extend_dense = (rope_method == 'self_extend' and self.layer_index in self.hip_dense_layers)
@@ -165,8 +173,8 @@ class HipAttentionBackend:
                     TSRC = N_TSRC // N
                     
                     query = query.view(batch_size, TDST, H, HID)
-                    key = key.view(batch_size, TSRC, H, HID)
-                    value = value.view(batch_size, TSRC, H, HID)
+                    key = key.view(batch_size, TSRC, H_KV, HID)
+                    value = value.view(batch_size, TSRC, H_KV, HID)
                     
                     query = query.permute(0, 2, 1, 3).reshape(-1, TDST, HID)
                     key = key.permute(0, 2, 1, 3).reshape(-1, TSRC, HID)

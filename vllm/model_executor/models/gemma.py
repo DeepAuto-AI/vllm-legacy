@@ -14,7 +14,9 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 """Inference-only Gemma model compatible with HuggingFace weights."""
+import os
 from typing import List, Optional, Tuple
+import warnings
 
 import torch
 from torch import nn
@@ -71,14 +73,17 @@ class GemmaMLP(nn.Module):
 
 class GemmaAttention(nn.Module):
 
-    def __init__(self,
-                 hidden_size: int,
-                 num_heads: int,
-                 num_kv_heads: int,
-                 head_dim: int,
-                 max_position_embeddings: int = 8192,
-                 rope_theta: float = 10000,
-                 linear_method: Optional[LinearMethodBase] = None) -> None:
+    def __init__(
+        self,
+        hidden_size: int,
+        num_heads: int,
+        num_kv_heads: int,
+        head_dim: int,
+        max_position_embeddings: int = 8192,
+        rope_theta: float = 10000,
+        linear_method: Optional[LinearMethodBase] = None,
+        layer_index: Optional[int] = None,
+    ) -> None:
         super().__init__()
         self.hidden_size = hidden_size
         tp_size = get_tensor_model_parallel_world_size()
@@ -123,10 +128,16 @@ class GemmaAttention(nn.Module):
             base=self.rope_theta,
             is_neox_style=True,
         )
-        self.attn = Attention(self.num_heads,
-                              self.head_dim,
-                              self.scaling,
-                              num_kv_heads=self.num_kv_heads)
+        self.attn = Attention(
+            self.num_heads,
+            self.head_dim,
+            self.scaling,
+            num_kv_heads=self.num_kv_heads,
+            layer_index=layer_index,
+        )
+        
+        self.rope_method = os.getenv('HIP_ROPE_METHOD', 'none')
+        warnings.warn(f'rope method {self.rope_method}')
 
     def forward(
         self,
@@ -135,11 +146,39 @@ class GemmaAttention(nn.Module):
         kv_cache: KVCache,
         input_metadata: InputMetadata,
     ) -> torch.Tensor:
+        # qkv, _ = self.qkv_proj(hidden_states)
+        # q, k, v = qkv.split([self.q_size, self.kv_size, self.kv_size], dim=-1)
+        # q, k = self.rotary_emb(positions, q, k)
+        # k_cache, v_cache = kv_cache
+        # attn_output = self.attn(q, k, v, k_cache, v_cache, input_metadata)
+        # output, _ = self.o_proj(attn_output)
+        # return output
+        
         qkv, _ = self.qkv_proj(hidden_states)
         q, k, v = qkv.split([self.q_size, self.kv_size, self.kv_size], dim=-1)
-        q, k = self.rotary_emb(positions, q, k)
         k_cache, v_cache = kv_cache
-        attn_output = self.attn(q, k, v, k_cache, v_cache, input_metadata)
+        
+        if self.rope_method == 'none':
+            q, k = self.rotary_emb(positions, q, k)
+            attn_output = self.attn(
+                q, k, v, 
+                k_cache, v_cache, input_metadata, 
+                rope_method=self.rope_method
+            )
+        elif self.rope_method == 'self_extend':
+            cos, sin = self.rotary_emb.get_cos_sin_cache()
+            position_ids = positions
+            attn_output = self.attn(
+                q, k, v, k_cache, v_cache, input_metadata,
+                
+                rope_method=self.rope_method,
+                rope_cos=cos,
+                rope_sin=sin,
+                position_ids=position_ids,
+            )
+        else:
+            raise Exception()
+        
         output, _ = self.o_proj(attn_output)
         return output
 
@@ -150,6 +189,7 @@ class GemmaDecoderLayer(nn.Module):
         self,
         config: GemmaConfig,
         linear_method: Optional[LinearMethodBase] = None,
+        layer_index: Optional[int] = None,
     ) -> None:
         super().__init__()
         self.hidden_size = config.hidden_size
@@ -161,6 +201,7 @@ class GemmaDecoderLayer(nn.Module):
             max_position_embeddings=config.max_position_embeddings,
             rope_theta=config.rope_theta,
             linear_method=linear_method,
+            layer_index=layer_index,
         )
         self.mlp = GemmaMLP(
             hidden_size=self.hidden_size,
@@ -216,8 +257,12 @@ class GemmaModel(nn.Module):
             config.hidden_size,
         )
         self.layers = nn.ModuleList([
-            GemmaDecoderLayer(config, linear_method)
-            for _ in range(config.num_hidden_layers)
+            GemmaDecoderLayer(
+                config, 
+                linear_method=linear_method, 
+                layer_index=layer_index
+            )
+            for layer_index in range(config.num_hidden_layers)
         ])
         self.norm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
 
