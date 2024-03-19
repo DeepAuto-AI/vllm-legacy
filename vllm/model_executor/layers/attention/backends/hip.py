@@ -1,4 +1,5 @@
 """Attention layer with Flash and PagedAttention."""
+import math
 import os
 from typing import List, Literal, Optional
 import warnings
@@ -56,6 +57,10 @@ class HipAttentionBackend:
         
         self.self_extend_scale = int(os.getenv('SE_SCALE', '8'))
         self.self_extend_window = int(os.getenv('SE_WINDOW', '1024'))
+        
+        self.checkout_last = False
+        self.last_ks = None
+        self.last_indices = None
 
     def forward(
         self,
@@ -77,10 +82,8 @@ class HipAttentionBackend:
             query: shape = [batch_size, seq_len, num_heads * head_size]
             key: shape = [batch_size, seq_len, num_kv_heads * head_size]
             value: shape = [batch_size, seq_len, num_kv_heads * head_size]
-            key_cache: shape = [num_blocks, num_kv_heads, head_size/x,
-                block_size, x]
-            value_cache: shape = [num_blocks, num_kv_heads, head_size,
-                block_size]
+            key_cache: shape = [num_blocks, num_kv_heads, head_size/x, block_size, x]
+            value_cache: shape = [num_blocks, num_kv_heads, head_size, block_size]
             input_metadata: metadata for the inputs.
         Returns:
             shape = [batch_size, seq_len, num_heads * head_size]
@@ -90,6 +93,20 @@ class HipAttentionBackend:
         query = query.view(-1, self.num_heads, self.head_size)
         key = key.view(-1, self.num_kv_heads, self.head_size)
         value = value.view(-1, self.num_kv_heads, self.head_size)
+        
+        if input_metadata.is_prompt and key_cache is not None and value_cache is not None:
+            # it is okay to use linear cost here
+            block_size = value_cache.shape[-1]
+            # print(block_size, input_metadata.slot_mapping, input_metadata.slot_mapping.shape)
+            block_idx = (input_metadata.slot_mapping.view(-1)[::block_size] // block_size).to(
+                dtype=torch.int32, 
+                device='cpu', 
+                non_blocking=True
+            )
+            if hasattr(key_cache, 'prompt_start'):
+                key_cache.prompt_start(block_idx)
+            if hasattr(value_cache, 'prompt_start'):
+                value_cache.prompt_start(block_idx)
 
         # Reshape the keys and values and store them in the cache.
         # If key_cache and value_cache are not provided, the new key and value
@@ -243,9 +260,9 @@ class HipAttentionBackend:
             elif paged_backend == 'hip':
                 assert rope_method in ['none', 'self_extend']
                 
-                warnings.warn('paged attention backend is timber')
+                warnings.warn('paged attention backend is hip')
                 
-                output, _ = paged_timber_attention(
+                output, (indices, ks, _) = paged_timber_attention(
                     q=query,
                     q_scale=self.scale,
                     k=key_cache,
@@ -269,10 +286,20 @@ class HipAttentionBackend:
                     self_extend_window=self.self_extend_window,
                 )
                 
+                if self.checkout_last:
+                    self.last_ks = ks
+                    self.last_indices = indices
+                
                 N_H, _, HID = output.shape
                 N = query.shape[0]
                 H = N_H // N
                 output = output.view(N, H, HID)
 
+        if input_metadata.is_prompt and key_cache is not None and value_cache is not None:
+            if hasattr(key_cache, 'prompt_end'):
+                key_cache.prompt_end()
+            if hasattr(value_cache, 'prompt_end'):
+                value_cache.prompt_end()
+        
         # Reshape the output tensor.
         return output.view(batch_size, seq_len, hidden_size)

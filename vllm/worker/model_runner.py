@@ -607,18 +607,25 @@ class ModelRunner:
         # Execute the model.
         is_prompt = input_tokens.shape[-1] > 1
         
-        if not is_prompt:
-            for k_cache, v_cache in kv_caches:
-                if hasattr(k_cache, 'readonly_start'):
-                    k_cache.readonly_start()
-                if hasattr(v_cache, 'readonly_start'):
-                    v_cache.readonly_start()
+        for k_cache, v_cache in kv_caches:
+            if not is_prompt:
+                if hasattr(k_cache, 'decode_start'):
+                    k_cache.decode_start()
+                if hasattr(v_cache, 'decode_start'):
+                    v_cache.decode_start()
+            else:
+                pass
+                # if hasattr(k_cache, 'prompt_start'):
+                #     k_cache.prompt_start()
+                # if hasattr(v_cache, 'prompt_start'):
+                #     v_cache.prompt_start()
         
         if input_metadata.use_cuda_graph:
             graph_batch_size = input_tokens.shape[0]
             model_executable = self.graph_runners[graph_batch_size]
         else:
             model_executable = self.model
+        
         hidden_states = model_executable(
             input_ids=input_tokens,
             positions=input_positions,
@@ -626,12 +633,18 @@ class ModelRunner:
             input_metadata=input_metadata,
         )
         
-        if not is_prompt:
-            for k_cache, v_cache in kv_caches:
-                if hasattr(k_cache, 'readonly_end'):
-                    k_cache.readonly_end()
-                if hasattr(v_cache, 'readonly_end'):
-                    v_cache.readonly_end()
+        for k_cache, v_cache in kv_caches:
+            if not is_prompt:
+                if hasattr(k_cache, 'decode_end'):
+                    k_cache.decode_end()
+                if hasattr(v_cache, 'decode_end'):
+                    v_cache.decode_end()
+            else:
+                pass
+                # if hasattr(k_cache, 'prompt_end'):
+                #     k_cache.prompt_end()
+                # if hasattr(v_cache, 'prompt_end'):
+                #     v_cache.prompt_end()
         
         if BENCHMARK_RUNNER: end_model.record()
 
@@ -650,7 +663,7 @@ class ModelRunner:
             elapsed_sample = start_sample.elapsed_time(end_sample)
             elapsed_total = (time.time() - t_start) * 1000
             
-            print(f'[{time.time() * 1000:.3f}][{len(seq_group_metadata_list) if seq_group_metadata_list is not None else None}] prepare: {elapsed_prepare:.3f}, model: {elapsed_model:.3f}, sample: {elapsed_sample:.3f}, total: {elapsed_total:.3f}')
+            print(f'[{time.time() * 1000:.3f}][{len(seq_group_metadata_list) if seq_group_metadata_list is not None else None}](is_prompt: {is_prompt}) prepare: {elapsed_prepare:.3f}, model: {elapsed_model:.3f}, sample: {elapsed_sample:.3f}, total: {elapsed_total:.3f}')
         
         return output
 
@@ -836,6 +849,10 @@ class CUDAGraphRunner:
         self.graph = None
         self.input_buffers: Dict[str, torch.Tensor] = {}
         self.output_buffers: Dict[str, torch.Tensor] = {}
+        
+        self.offload_prefetch = \
+            (os.getenv('OFFLOAD_PREFETCH', '0') == '1') and\
+            (os.getenv('CACHE_ENGINE', 'vllm') in ['offload_v', 'offload_kv'])
 
     def capture(
         self,
@@ -861,6 +878,16 @@ class CUDAGraphRunner:
         # Capture the graph.
         # NOTE(woosuk): Python 3.8 does not support multi-line with statements.
         # https://stackoverflow.com/questions/31039022/python-multi-line-with-statement
+        if self.offload_prefetch:
+            from vllm.model_executor.layers.attention import Attention
+            from vllm.model_executor.layers.attention.backends.hip import HipAttentionBackend
+            for m in self.model.modules():
+                if isinstance(m, Attention):
+                    backend = m.backend # type: HipAttentionBackend
+                    backend.checkout_last = True
+                    backend.last_indices = None
+                    backend.last_ks = None
+        
         self.graph = torch.cuda.CUDAGraph()
         with torch.cuda.graph(self.graph, pool=memory_pool):  # noqa: SIM117
             with _maybe_cupy_nccl():
@@ -871,6 +898,26 @@ class CUDAGraphRunner:
                     input_metadata,
                 )
         torch.cuda.synchronize()
+        
+        if self.offload_prefetch:
+            from vllm.model_executor.layers.attention import Attention
+            from vllm.model_executor.layers.attention.backends.hip import HipAttentionBackend
+            last_hip_caches = []
+            for name, m in self.model.named_modules():
+                if isinstance(m, Attention):
+                    backend = m.backend # type: HipAttentionBackend
+                    backend.checkout_last = False
+                    
+                    last_hip_caches.append([
+                        name, 
+                        backend.last_indices, 
+                        backend.last_ks, 
+                        None, 
+                        None,
+                    ])
+                    
+                    backend.last_indices = None
+                    backend.last_ks = None
 
         # Save the input and output buffers.
         self.input_buffers = {
@@ -882,6 +929,8 @@ class CUDAGraphRunner:
             "block_tables": input_metadata.block_tables,
         }
         self.output_buffers = {"hidden_states": hidden_states}
+        if self.offload_prefetch:
+            self.output_buffers['hip_caches'] = last_hip_caches
         return
 
     def forward(
@@ -893,19 +942,52 @@ class CUDAGraphRunner:
     ) -> torch.Tensor:
         # KV caches are fixed tensors, so we don't need to copy them.
         del kv_caches
+        
+        # prefetch previously accessed tokens
+        if self.offload_prefetch:
+            from vllm.model_executor.layers.attention import Attention
+            from vllm.model_executor.layers.attention.backends.hip import HipAttentionBackend
+            from vllm.worker.cache_engine.map_cache_engine import MapCacheEngine, ManagedTensor
+            kv_caches = self.input_buffers['kv_caches']
+            hip_caches = self.output_buffers['hip_caches']
+            
+            # prefetch V
+            for kv_cache, hip_cache in zip(kv_caches, hip_caches):
+                _, v_cache = kv_cache
+                if isinstance(v_cache, ManagedTensor):
+                    name, indices, ks, cpu_indices, cpu_ks = hip_cache
+                    if (cpu_indices is not None) and (cpu_ks is not None):
+                        pass
+            
+            # prefetch K
 
         # Copy the input tensors to the input buffers.
         self.input_buffers["input_ids"].copy_(input_ids, non_blocking=True)
         self.input_buffers["positions"].copy_(positions, non_blocking=True)
-        self.input_buffers["slot_mapping"].copy_(input_metadata.slot_mapping,
-                                                 non_blocking=True)
-        self.input_buffers["context_lens"].copy_(input_metadata.context_lens,
-                                                 non_blocking=True)
-        self.input_buffers["block_tables"].copy_(input_metadata.block_tables,
-                                                 non_blocking=True)
+        self.input_buffers["slot_mapping"].copy_(
+            input_metadata.slot_mapping, non_blocking=True
+        )
+        self.input_buffers["context_lens"].copy_(
+            input_metadata.context_lens, non_blocking=True
+        )
+        self.input_buffers["block_tables"].copy_(
+            input_metadata.block_tables, non_blocking=True
+        )
 
         # Run the graph.
         self.graph.replay()
+        
+        if self.offload_prefetch:
+            kv_caches = self.input_buffers['kv_caches']
+            hip_caches = self.output_buffers['hip_caches']
+            for kv_cache, hip_cache in zip(kv_caches, hip_caches):
+                k_cache, v_cache = kv_cache
+                name, indices, ks, _, _ = hip_cache
+                if \
+                    (isinstance(k_cache, ManagedTensor) or isinstance(v_cache, ManagedTensor)) and\
+                    (indices is not None and ks is not None):
+                    hip_cache[-2] = indices.to('cpu', non_blocking=True)
+                    hip_cache[-1] = ks.to('cpu', non_blocking=True)
 
         # Return the output tensor.
         return self.output_buffers["hidden_states"]
