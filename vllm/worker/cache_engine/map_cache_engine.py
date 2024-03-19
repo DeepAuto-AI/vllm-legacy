@@ -154,8 +154,7 @@ class ManagedTensor:
                 cp.cuda.runtime.memAdvise(
                     block_ptr,
                     min(left_size, block_ptr_size),
-                    # cudaMemAdviseSetPreferredLocation, 
-                    cudaMemAdviseSetAccessedBy,
+                    cudaMemAdviseSetPreferredLocation, 
                     target_device,
                 )
                 cp.cuda.runtime.memPrefetchAsync(
@@ -177,8 +176,7 @@ class ManagedTensor:
             cp.cuda.runtime.memAdvise(
                 self.data_ptr(), 
                 self.byte_size, 
-                # cudaMemAdviseSetPreferredLocation, 
-                cudaMemAdviseSetAccessedBy,
+                cudaMemAdviseSetPreferredLocation, 
                 target_device,
             )
             cp.cuda.runtime.memPrefetchAsync(
@@ -204,116 +202,13 @@ class ManagedTensor:
     def prompt_end(self):
         # prepare decoding
         # to(cpu, non_blocking=True)
-        # cp.cuda.runtime.memAdvise(
-        #     self.data_ptr(), 
-        #     self.byte_size, 
-        #     cudaMemAdviseSetPreferredLocation, 
-        #     cudaCpuDeviceId
-        # )
+        cp.cuda.runtime.memAdvise(
+            self.data_ptr(), 
+            self.byte_size, 
+            cudaMemAdviseSetPreferredLocation, 
+            cudaCpuDeviceId
+        )
         # print('prompt zone done', time.time() - self.t_start)
-
-        # print(block_indices)
-        PAGE_SIZE = 2**(10+6) # 64KB
-        # dump all to GPU uwu. PCIe is cool :>
-        # to(0, non_blocking=True)
-        
-        block_indices = self.last_prompt_block_indices
-        block_stride = self.stride()[0]
-        base_ptr = self.data_ptr()
-        target_device = torch.cuda.current_device()
-        stream_id = torch.cuda.current_stream(target_device).stream_id
-        num_blocks = self.shape[0]
-        
-        t = time.time()
-        torch.cuda.synchronize(target_device)
-        # print('pre-synced', time.time() - t)
-        
-        # cp.cuda.runtime.memAdvise(
-        #     self.data_ptr(), 
-        #     self.byte_size, 
-        #     cudaMemAdviseSetPreferredLocation, 
-        #     target_device,
-        #     # cudaCpuDeviceId,
-        # )
-        # cp.cuda.runtime.memPrefetchAsync(
-        #     self.data_ptr(),
-        #     self.byte_size,
-        #     target_device, 
-        #     stream_id
-        # )
-        
-        last_block_ptr = block_ptr = None
-        block_ptr_size = 0
-        commited = 0
-        for i in range(len(block_indices)):
-            block_index = block_indices[i].item()
-            if block_index >= num_blocks: continue
-            if block_index < 0: continue
-            
-            new_block_ptr = ((base_ptr + block_index * block_stride * self.elem_size) // PAGE_SIZE) * PAGE_SIZE
-            new_block_ptr_size = math.ceil((block_stride * self.elem_size) / PAGE_SIZE) * PAGE_SIZE
-            # print(block_index, self.shape, block_ptr, block_ptr_size, self.elem_size, flush=True)
-            
-            if block_ptr is None:
-                last_block_ptr = block_ptr = new_block_ptr
-                block_ptr_size = new_block_ptr_size
-            
-            need_flush = False
-            if (new_block_ptr - last_block_ptr) == new_block_ptr_size:
-                block_ptr_size += new_block_ptr_size
-                # print('extend', last_block_ptr, new_block_ptr)
-                last_block_ptr = new_block_ptr
-            elif new_block_ptr == last_block_ptr:
-                # print('aligned')
-                pass
-            else:
-                need_flush = True
-            
-            if i == (len(block_indices) - 1):
-                need_flush = True
-            
-            if need_flush:
-                block_ptr = max(block_ptr, base_ptr)
-                left_size = max(0, (base_ptr + self.byte_size) - block_ptr)
-                # print('commit', block_ptr, left_size, block_ptr_size, base_ptr, self.byte_size)
-                # print('fetch', block_ptr, min(left_size, block_ptr_size))
-                cp.cuda.runtime.memAdvise(
-                    block_ptr,
-                    min(left_size, block_ptr_size),
-                    # cudaMemAdviseSetPreferredLocation, 
-                    cudaMemAdviseUnsetAccessedBy,
-                    cudaCpuDeviceId,
-                )
-                # cp.cuda.runtime.memPrefetchAsync(
-                #     block_ptr,
-                #     min(left_size, block_ptr_size),
-                #     target_device, 
-                #     stream_id
-                # )
-                commited += min(left_size, block_ptr_size)
-                if new_block_ptr == last_block_ptr:
-                    last_block_ptr = block_ptr = None
-                    block_ptr_size = 0
-                else:
-                    block_ptr = new_block_ptr
-                    block_ptr_size = new_block_ptr_size
-        
-        if commited == PAGE_SIZE:
-            print('single page') # this is happend when measure peak memory
-            cp.cuda.runtime.memAdvise(
-                self.data_ptr(), 
-                self.byte_size, 
-                # cudaMemAdviseSetPreferredLocation, 
-                cudaMemAdviseUnsetAccessedBy,
-                cudaCpuDeviceId,
-            )
-            cp.cuda.runtime.memPrefetchAsync(
-                self.data_ptr(),
-                self.byte_size,
-                target_device, 
-                stream_id
-            )
-
 
     def numel(self):
         return numel(self.shape)
