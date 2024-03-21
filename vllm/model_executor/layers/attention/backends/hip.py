@@ -98,11 +98,12 @@ class HipAttentionBackend:
             # it is okay to use linear cost here
             block_size = value_cache.shape[-1]
             # print(block_size, input_metadata.slot_mapping, input_metadata.slot_mapping.shape)
-            block_idx = (input_metadata.slot_mapping.view(-1)[::block_size] // block_size).to(
+            block_idx = (input_metadata.slot_mapping.view(-1)[::block_size] // block_size).sort().values.to(
                 dtype=torch.int32, 
                 device='cpu', 
                 non_blocking=True
             )
+            # print(block_idx)
             if hasattr(key_cache, 'prompt_start'):
                 key_cache.prompt_start(block_idx)
             if hasattr(value_cache, 'prompt_start'):

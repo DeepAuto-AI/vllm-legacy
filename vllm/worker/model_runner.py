@@ -625,6 +625,8 @@ class ModelRunner:
             model_executable = self.graph_runners[graph_batch_size]
         else:
             model_executable = self.model
+            for runner in self.graph_runners.values():
+                runner.need_offload_prefetch = True
         
         hidden_states = model_executable(
             input_ids=input_tokens,
@@ -853,6 +855,7 @@ class CUDAGraphRunner:
         self.offload_prefetch = \
             (os.getenv('OFFLOAD_PREFETCH', '0') == '1') and\
             (os.getenv('CACHE_ENGINE', 'vllm') in ['offload_v', 'offload_kv'])
+        self.need_offload_prefetch = False
 
     def capture(
         self,
@@ -943,22 +946,43 @@ class CUDAGraphRunner:
         # KV caches are fixed tensors, so we don't need to copy them.
         del kv_caches
         
+        benchmark_runner = False #os.getenv('BENCHMARK_RUNNER', '0') == '1'
+        
+        if benchmark_runner:
+            start_prepare = torch.cuda.Event(enable_timing=True)
+            end_prepare = torch.cuda.Event(enable_timing=True)
+            start_replay = torch.cuda.Event(enable_timing=True)
+            end_replay = torch.cuda.Event(enable_timing=True)
+            start_post = torch.cuda.Event(enable_timing=True)
+            end_post = torch.cuda.Event(enable_timing=True)
+            
+            start_prepare.record()
+        
         # prefetch previously accessed tokens
-        if self.offload_prefetch:
+        if self.offload_prefetch and self.need_offload_prefetch:
             from vllm.model_executor.layers.attention import Attention
             from vllm.model_executor.layers.attention.backends.hip import HipAttentionBackend
             from vllm.worker.cache_engine.map_cache_engine import MapCacheEngine, ManagedTensor
             kv_caches = self.input_buffers['kv_caches']
             hip_caches = self.output_buffers['hip_caches']
             
-            # prefetch V
+            # prefetch KV
+            torch.cuda.synchronize(torch.cuda.current_device())
+            t = time.time()
+            
             for kv_cache, hip_cache in zip(kv_caches, hip_caches):
                 _, v_cache = kv_cache
                 if isinstance(v_cache, ManagedTensor):
                     name, indices, ks, cpu_indices, cpu_ks = hip_cache
-                    if (cpu_indices is not None) and (cpu_ks is not None):
-                        pass
+                    if (cpu_indices is not None):
+                        v_cache.prefetch_blocks(cpu_indices, v_cache.target_device)
+                        hip_cache[-2] = None
+                        hip_cache[-1] = None
+                        self.need_offload_prefetch = False
             
+            torch.cuda.synchronize(torch.cuda.current_device())
+            
+            print(f'prefetch v: {(time.time() - t)*1000:.3f} ms')
             # prefetch K
 
         # Copy the input tensors to the input buffers.
@@ -973,11 +997,19 @@ class CUDAGraphRunner:
         self.input_buffers["block_tables"].copy_(
             input_metadata.block_tables, non_blocking=True
         )
+        
+        if benchmark_runner:
+            end_prepare.record()
+            start_replay.record()
 
         # Run the graph.
         self.graph.replay()
+
+        if benchmark_runner:
+            end_replay.record()
+            start_post.record()
         
-        if self.offload_prefetch:
+        if self.offload_prefetch and self.need_offload_prefetch:
             kv_caches = self.input_buffers['kv_caches']
             hip_caches = self.output_buffers['hip_caches']
             for kv_cache, hip_cache in zip(kv_caches, hip_caches):
@@ -986,8 +1018,41 @@ class CUDAGraphRunner:
                 if \
                     (isinstance(k_cache, ManagedTensor) or isinstance(v_cache, ManagedTensor)) and\
                     (indices is not None and ks is not None):
-                    hip_cache[-2] = indices.to('cpu', non_blocking=True)
-                    hip_cache[-1] = ks.to('cpu', non_blocking=True)
+                    batch_size, seq_len = input_ids.shape
+                    block_size = 16
+                    
+                    N_H, TDST, K = indices.shape
+                    N = batch_size
+                    H = N_H // batch_size
+                    
+                    indices = indices.view(N, H, TDST, K)
+                    
+                    block_indices_batch = []
+                    
+                    table = input_metadata.block_tables
+                    
+                    for ibatch in range(N):
+                        block_indices = (indices[ibatch] // block_size).view(-1)
+                        block_indices = torch.unique(block_indices)
+                        # print('marker1112:', block_indices.shape[0])
+                        block_indices = torch.clamp(block_indices, 0, table.shape[-1] - 1).to(torch.int64)
+                        block_indices = table[ibatch].gather(0, index=block_indices)
+                        assert block_indices.ndim == 1
+                        block_indices_batch.append(block_indices)
+                    
+                    block_indices = torch.concat(block_indices_batch).sort().values.to('cpu', non_blocking=True)
+                    
+                    hip_cache[-2] = block_indices
+                    hip_cache[-1] = None
+
+        if benchmark_runner:
+            end_post.record()
+            torch.cuda.synchronize()
+            
+            elapsed_prepare = start_prepare.elapsed_time(end_prepare)
+            elapsed_replay = start_replay.elapsed_time(end_replay)
+            elapsed_post = start_post.elapsed_time(end_post)
+            print(f'CUDAGraphRunner.forward: prepare: {elapsed_prepare:.3f}, replay: {elapsed_replay:.3f}, post: {elapsed_post:.3f}')
 
         # Return the output tensor.
         return self.output_buffers["hidden_states"]
