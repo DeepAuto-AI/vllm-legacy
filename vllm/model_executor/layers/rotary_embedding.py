@@ -165,7 +165,8 @@ class RotaryEmbedding(nn.Module):
         key: torch.Tensor,
         offsets: Optional[torch.Tensor] = None,
     ) -> Tuple[torch.Tensor, torch.Tensor]:
-        self.cos_sin_cache = self.cos_sin_cache.to(positions.get_device())
+        if self.cos_sin_cache.get_device() != positions.get_device():
+            self.cos_sin_cache = self.cos_sin_cache.to(positions.get_device())
         # ops.rotary_embedding()/batched_rotary_embedding()
         # are in-place operations that update the query and key tensors.
         if offsets is not None:

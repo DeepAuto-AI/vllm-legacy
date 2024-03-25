@@ -94,7 +94,9 @@ class HipAttentionBackend:
         key = key.view(-1, self.num_kv_heads, self.head_size)
         value = value.view(-1, self.num_kv_heads, self.head_size)
         
-        if input_metadata.is_prompt and key_cache is not None and value_cache is not None:
+        need_prompt_prefetch = hasattr(key_cache, 'prompt_start') or hasattr(value_cache, 'prompt_start')
+        need_prompt_prefetch = need_prompt_prefetch and (input_metadata.is_prompt and key_cache is not None and value_cache is not None)
+        if need_prompt_prefetch:
             # it is okay to use linear cost here
             block_size = value_cache.shape[-1]
             # print(block_size, input_metadata.slot_mapping, input_metadata.slot_mapping.shape)
