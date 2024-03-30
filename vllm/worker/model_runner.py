@@ -977,17 +977,6 @@ class CUDAGraphRunner:
         need_checkout_hip_caches = self.offload_prefetch or self.checkout_computed_hip_mask
         
         assert self.graph is None
-        # Run the model once without capturing the graph.
-        # This is to make sure that the captured graph does not include the
-        # kernel launches for initial benchmarking (e.g., Triton autotune).
-        with _maybe_cupy_nccl():
-            self.model(
-                input_ids,
-                positions,
-                kv_caches,
-                input_metadata,
-            )
-        torch.cuda.synchronize()
 
         # Capture the graph.
         # NOTE(woosuk): Python 3.8 does not support multi-line with statements.
@@ -1014,9 +1003,28 @@ class CUDAGraphRunner:
                     backend = m.backend # type: HipAttentionBackend
                     assert isinstance(backend, HipAttentionBackend)
                     backend.using_precomputed_mask = True
+                    backend.checkout_last = False
                     backend.precomputed_indices = self.precomputed_hip_caches[idx_module][1]
                     backend.precomputed_ks = self.precomputed_hip_caches[idx_module][2]
                     idx_module += 1
+        else:
+            for m in self.model.modules():
+                if isinstance(m, Attention):
+                    backend = m.backend # type: HipAttentionBackend
+                    if isinstance(backend, HipAttentionBackend):
+                        backend.using_precomputed_mask = False
+        
+        # Run the model once without capturing the graph.
+        # This is to make sure that the captured graph does not include the
+        # kernel launches for initial benchmarking (e.g., Triton autotune).
+        with _maybe_cupy_nccl():
+            self.model(
+                input_ids,
+                positions,
+                kv_caches,
+                input_metadata,
+            )
+        torch.cuda.synchronize()
         
         self.graph = torch.cuda.CUDAGraph()
         with torch.cuda.graph(self.graph, pool=memory_pool):  # noqa: SIM117
