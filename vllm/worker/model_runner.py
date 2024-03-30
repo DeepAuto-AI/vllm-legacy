@@ -1008,6 +1008,9 @@ class CUDAGraphRunner:
                     backend.precomputed_ks = self.precomputed_hip_caches[idx_module][2]
                     idx_module += 1
         else:
+            from vllm.model_executor.layers.attention import Attention
+            from vllm.model_executor.layers.attention.backends.hip import HipAttentionBackend
+            
             for m in self.model.modules():
                 if isinstance(m, Attention):
                     backend = m.backend # type: HipAttentionBackend
