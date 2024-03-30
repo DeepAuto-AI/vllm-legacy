@@ -1051,6 +1051,7 @@ class CUDAGraphRunner:
                     backend.last_indices = None
                     backend.last_ks = None
         
+        # after capture clear it
         for m in self.model.modules():
             if isinstance(m, Attention):
                 backend = m.backend
