@@ -60,7 +60,7 @@ class ManagedTensor:
         self.tensor = tensor
         
         
-        logger.info(f'managed allocated {self.data_ptr():02X} {self.byte_size:,} bytes')
+        logger.info(f'managed allocated {self.data_ptr():02X} {self.byte_size:,} bytes @ {self.target_device}')
 
     def decode_start(self):
         # already synchronized

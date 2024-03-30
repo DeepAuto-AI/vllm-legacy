@@ -61,6 +61,10 @@ class HipAttentionBackend:
         self.checkout_last = False
         self.last_ks = None
         self.last_indices = None
+        
+        self.using_precomputed_mask = False
+        self.precomputed_ks = None
+        self.precomputed_indices = None
 
     def forward(
         self,
@@ -97,6 +101,7 @@ class HipAttentionBackend:
         need_prompt_prefetch = hasattr(key_cache, 'prompt_start') or hasattr(value_cache, 'prompt_start')
         need_prompt_prefetch = need_prompt_prefetch and (input_metadata.is_prompt and key_cache is not None and value_cache is not None)
         if need_prompt_prefetch:
+            assert not torch.cuda.is_current_stream_capturing()
             # it is okay to use linear cost here
             block_size = value_cache.shape[-1]
             # print(block_size, input_metadata.slot_mapping, input_metadata.slot_mapping.shape)
@@ -287,6 +292,10 @@ class HipAttentionBackend:
                     
                     self_extend_scale=self.self_extend_scale,
                     self_extend_window=self.self_extend_window,
+                    
+                    using_precomputed_mask=self.using_precomputed_mask,
+                    precomputed_ks=self.precomputed_ks,
+                    precomputed_indices=self.precomputed_indices,
                 )
                 
                 if self.checkout_last:
@@ -299,6 +308,8 @@ class HipAttentionBackend:
                 output = output.view(N, H, HID)
 
         if input_metadata.is_prompt and key_cache is not None and value_cache is not None:
+            assert not torch.cuda.is_current_stream_capturing()
+            
             if hasattr(key_cache, 'prompt_end'):
                 key_cache.prompt_end()
             if hasattr(value_cache, 'prompt_end'):

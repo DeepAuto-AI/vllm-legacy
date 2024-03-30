@@ -64,7 +64,7 @@ class ModelRunner:
         self.block_size = None  # Set after initial profiling.
         self.lora_manager = None
 
-        self.graph_runners: Dict[int, CUDAGraphRunner] = {}
+        self.graph_runners: Dict[int, Union[CUDAGraphRunner, HipGraphRunnerCounter]] = {}
         self.graph_memory_pool = None  # Set during graph capture.
 
         self.max_context_len_to_capture = (
@@ -84,6 +84,8 @@ class ModelRunner:
         # Set enforce_eager to True for Neuron backend, to avoid capturing graph
         if self.device_config.is_neuron:
             self.model_config.enforce_eager = True
+        
+        self.hip_refresh_interval = int(os.getenv('HIP_REFRESH_INTERVAL', '1'))
 
     def load_model(self) -> None:
         with measure_cuda_memory() as m:
@@ -607,26 +609,37 @@ class ModelRunner:
         # Execute the model.
         is_prompt = input_tokens.shape[-1] > 1
         
+        # notify decoding
+        # prompt notification is in HiPAttentionBackend
         for k_cache, v_cache in kv_caches:
             if not is_prompt:
                 if hasattr(k_cache, 'decode_start'):
                     k_cache.decode_start()
                 if hasattr(v_cache, 'decode_start'):
                     v_cache.decode_start()
-            else:
-                pass
-                # if hasattr(k_cache, 'prompt_start'):
-                #     k_cache.prompt_start()
-                # if hasattr(v_cache, 'prompt_start'):
-                #     v_cache.prompt_start()
         
         if input_metadata.use_cuda_graph:
             graph_batch_size = input_tokens.shape[0]
             model_executable = self.graph_runners[graph_batch_size]
+            if isinstance(model_executable, CUDAGraphRunner):
+                pass
+            elif isinstance(model_executable, HipGraphRunnerCounter):
+                model_executable = model_executable.get_next_graph()
+            else:
+                raise Exception()
         else:
+            # we counter the prompt
             model_executable = self.model
+            # reset cuda graphs caches
             for runner in self.graph_runners.values():
-                runner.need_offload_prefetch = True
+                if isinstance(runner, CUDAGraphRunner):
+                    runner.need_offload_prefetch = True
+                elif isinstance(runner, HipGraphRunnerCounter):
+                    runner.counter = 0
+                    runner.graph_checkout.need_offload_prefetch = True
+                    runner.graph_precomputed_mask.need_offload_prefetch = True
+                else:
+                    raise Exception()
         
         hidden_states = model_executable(
             input_ids=input_tokens,
@@ -641,12 +654,6 @@ class ModelRunner:
                     k_cache.decode_end()
                 if hasattr(v_cache, 'decode_end'):
                     v_cache.decode_end()
-            else:
-                pass
-                # if hasattr(k_cache, 'prompt_end'):
-                #     k_cache.prompt_end()
-                # if hasattr(v_cache, 'prompt_end'):
-                #     v_cache.prompt_end()
         
         if BENCHMARK_RUNNER: end_model.record()
 
@@ -815,16 +822,50 @@ class ModelRunner:
                     )
                     self.set_active_loras(set(), lora_mapping)
 
-                graph_runner = CUDAGraphRunner(self.model)
-                graph_runner.capture(
-                    input_tokens[:batch_size],
-                    input_positions[:batch_size],
-                    kv_caches,
-                    input_metadata,
-                    memory_pool=self.graph_memory_pool,
-                )
-                self.graph_memory_pool = graph_runner.graph.pool()
-                self.graph_runners[batch_size] = graph_runner
+                if self.hip_refresh_interval > 1:
+                    graph_runner_checkout = CUDAGraphRunner(
+                        self.model,
+                        checkout_computed_hip_mask=True,
+                    )
+                    graph_runner_checkout.capture(
+                        input_tokens[:batch_size],
+                        input_positions[:batch_size],
+                        kv_caches,
+                        input_metadata,
+                        memory_pool=self.graph_memory_pool,
+                    )
+                    self.graph_memory_pool = graph_runner_checkout.graph.pool()
+                    
+                    graph_runner_precomputed_mask = CUDAGraphRunner(
+                        self.model,
+                        using_precomputed_hip_mask=True,
+                        precomputed_hip_caches=graph_runner_checkout.output_buffers['hip_caches'],
+                    )
+                    graph_runner_precomputed_mask.capture(
+                        input_tokens[:batch_size],
+                        input_positions[:batch_size],
+                        kv_caches,
+                        input_metadata,
+                        memory_pool=self.graph_memory_pool,
+                    )
+                    self.graph_memory_pool = graph_runner_precomputed_mask.graph.pool()
+                    
+                    self.graph_runners[batch_size] = HipGraphRunnerCounter(
+                        graph_runner_checkout, 
+                        graph_runner_precomputed_mask,
+                        self.hip_refresh_interval,
+                    )
+                else:
+                    graph_runner = CUDAGraphRunner(self.model)
+                    graph_runner.capture(
+                        input_tokens[:batch_size],
+                        input_positions[:batch_size],
+                        kv_caches,
+                        input_metadata,
+                        memory_pool=self.graph_memory_pool,
+                    )
+                    self.graph_memory_pool = graph_runner.graph.pool()
+                    self.graph_runners[batch_size] = graph_runner
 
         end_time = time.perf_counter()
         elapsed_time = end_time - start_time
@@ -843,10 +884,45 @@ class ModelRunner:
     def vocab_size(self) -> int:
         return self.model_config.get_vocab_size()
 
+class HipGraphRunnerCounter:
+    def __init__(
+        self, 
+        graph_checkout: "CUDAGraphRunner", 
+        graph_precomputed_mask: "CUDAGraphRunner",
+        refresh_interval: int,
+    ):
+        self.counter = 0
+        
+        self.refresh_interval = refresh_interval
+        
+        self.graph_checkout = graph_checkout
+        self.graph_precomputed_mask = graph_precomputed_mask
+        
+    def get_next_graph(self):
+        if (self.counter % self.refresh_interval) == 0:
+            graph = self.graph_checkout
+        else:
+            graph = self.graph_precomputed_mask
+        self.counter += 1
+        return graph
+
+HipCache = Tuple[
+    str,            #name
+    torch.Tensor,   #indices
+    torch.Tensor,   #ks
+    torch.Tensor,   #blocks
+]
 
 class CUDAGraphRunner:
 
-    def __init__(self, model: nn.Module):
+    def __init__(
+        self, 
+        model: nn.Module,
+        
+        checkout_computed_hip_mask: bool = False,
+        using_precomputed_hip_mask: bool = False,
+        precomputed_hip_caches: List[HipCache] = None,
+    ):
         self.model = model
         self.graph = None
         self.input_buffers: Dict[str, torch.Tensor] = {}
@@ -856,6 +932,10 @@ class CUDAGraphRunner:
             (os.getenv('OFFLOAD_PREFETCH', '0') == '1') and\
             (os.getenv('CACHE_ENGINE', 'vllm') in ['offload_v', 'offload_kv'])
         self.need_offload_prefetch = False
+        
+        self.checkout_computed_hip_mask = checkout_computed_hip_mask
+        self.using_precomputed_hip_mask = using_precomputed_hip_mask
+        self.precomputed_hip_caches = precomputed_hip_caches
 
     def capture(
         self,
@@ -865,6 +945,8 @@ class CUDAGraphRunner:
         input_metadata: InputMetadata,
         memory_pool,
     ) -> None:
+        need_checkout_hip_caches = self.offload_prefetch or self.checkout_computed_hip_mask
+        
         assert self.graph is None
         # Run the model once without capturing the graph.
         # This is to make sure that the captured graph does not include the
@@ -881,15 +963,31 @@ class CUDAGraphRunner:
         # Capture the graph.
         # NOTE(woosuk): Python 3.8 does not support multi-line with statements.
         # https://stackoverflow.com/questions/31039022/python-multi-line-with-statement
-        if self.offload_prefetch:
+        if need_checkout_hip_caches:
             from vllm.model_executor.layers.attention import Attention
             from vllm.model_executor.layers.attention.backends.hip import HipAttentionBackend
             for m in self.model.modules():
                 if isinstance(m, Attention):
                     backend = m.backend # type: HipAttentionBackend
+                    assert isinstance(backend, HipAttentionBackend)
                     backend.checkout_last = True
                     backend.last_indices = None
                     backend.last_ks = None
+        
+        if self.using_precomputed_hip_mask:
+            from vllm.model_executor.layers.attention import Attention
+            from vllm.model_executor.layers.attention.backends.hip import HipAttentionBackend
+            
+            assert not self.checkout_computed_hip_mask
+            idx_module = 0
+            for m in self.model.modules():
+                if isinstance(m, Attention):
+                    backend = m.backend # type: HipAttentionBackend
+                    assert isinstance(backend, HipAttentionBackend)
+                    backend.using_precomputed_mask = True
+                    backend.precomputed_indices = self.precomputed_hip_caches[idx_module][1]
+                    backend.precomputed_ks = self.precomputed_hip_caches[idx_module][2]
+                    idx_module += 1
         
         self.graph = torch.cuda.CUDAGraph()
         with torch.cuda.graph(self.graph, pool=memory_pool):  # noqa: SIM117
@@ -902,7 +1000,7 @@ class CUDAGraphRunner:
                 )
         torch.cuda.synchronize()
         
-        if self.offload_prefetch:
+        if need_checkout_hip_caches:
             from vllm.model_executor.layers.attention import Attention
             from vllm.model_executor.layers.attention.backends.hip import HipAttentionBackend
             last_hip_caches = []
@@ -915,7 +1013,6 @@ class CUDAGraphRunner:
                         name, 
                         backend.last_indices, 
                         backend.last_ks, 
-                        None, 
                         None,
                     ])
                     
@@ -932,7 +1029,7 @@ class CUDAGraphRunner:
             "block_tables": input_metadata.block_tables,
         }
         self.output_buffers = {"hidden_states": hidden_states}
-        if self.offload_prefetch:
+        if need_checkout_hip_caches:
             self.output_buffers['hip_caches'] = last_hip_caches
         return
 
@@ -946,9 +1043,9 @@ class CUDAGraphRunner:
         # KV caches are fixed tensors, so we don't need to copy them.
         del kv_caches
         
-        benchmark_runner = False #os.getenv('BENCHMARK_RUNNER', '0') == '1'
+        benchmark_graph_runner = os.getenv('BENCHMARK_GRAPH_RUNNER', '0') == '1'
         
-        if benchmark_runner:
+        if benchmark_graph_runner:
             start_prepare = torch.cuda.Event(enable_timing=True)
             end_prepare = torch.cuda.Event(enable_timing=True)
             start_replay = torch.cuda.Event(enable_timing=True)
@@ -973,10 +1070,9 @@ class CUDAGraphRunner:
             for kv_cache, hip_cache in zip(kv_caches, hip_caches):
                 _, v_cache = kv_cache
                 if isinstance(v_cache, ManagedTensor):
-                    name, indices, ks, cpu_indices, cpu_ks = hip_cache
+                    name, indices, ks, cpu_indices = hip_cache
                     if (cpu_indices is not None):
                         v_cache.prefetch_blocks(cpu_indices, v_cache.target_device)
-                        hip_cache[-2] = None
                         hip_cache[-1] = None
                         self.need_offload_prefetch = False
             
@@ -998,14 +1094,14 @@ class CUDAGraphRunner:
             input_metadata.block_tables, non_blocking=True
         )
         
-        if benchmark_runner:
+        if benchmark_graph_runner:
             end_prepare.record()
             start_replay.record()
 
         # Run the graph.
         self.graph.replay()
 
-        if benchmark_runner:
+        if benchmark_graph_runner:
             end_replay.record()
             start_post.record()
         
@@ -1014,7 +1110,7 @@ class CUDAGraphRunner:
             hip_caches = self.output_buffers['hip_caches']
             for kv_cache, hip_cache in zip(kv_caches, hip_caches):
                 k_cache, v_cache = kv_cache
-                name, indices, ks, _, _ = hip_cache
+                name, indices, ks, _ = hip_cache
                 if \
                     (isinstance(k_cache, ManagedTensor) or isinstance(v_cache, ManagedTensor)) and\
                     (indices is not None and ks is not None):
@@ -1042,17 +1138,16 @@ class CUDAGraphRunner:
                     
                     block_indices = torch.concat(block_indices_batch).sort().values.to('cpu', non_blocking=True)
                     
-                    hip_cache[-2] = block_indices
-                    hip_cache[-1] = None
+                    hip_cache[-1] = block_indices
 
-        if benchmark_runner:
+        if benchmark_graph_runner:
             end_post.record()
             torch.cuda.synchronize()
             
             elapsed_prepare = start_prepare.elapsed_time(end_prepare)
             elapsed_replay = start_replay.elapsed_time(end_replay)
             elapsed_post = start_post.elapsed_time(end_post)
-            print(f'CUDAGraphRunner.forward: prepare: {elapsed_prepare:.3f}, replay: {elapsed_replay:.3f}, post: {elapsed_post:.3f}')
+            print(f'[{time.time() * 1000:.3f}] CUDAGraphRunner.forward: prepare: {elapsed_prepare:.3f}, replay: {elapsed_replay:.3f}, post: {elapsed_post:.3f}')
 
         # Return the output tensor.
         return self.output_buffers["hidden_states"]
