@@ -33,6 +33,25 @@ LORA_WARMUP_RANK = 8
 # NOTE: _get_graph_batch_size needs to be updated if this list is changed.
 _BATCH_SIZES_TO_CAPTURE = [1, 2, 4] + [8 * i for i in range(1, 33)]
 
+class MetricTracer:
+    def __init__(self, n_warmup = 0):
+        self.x_sum = 0
+        self.x_count = 0
+        self.n_warmup = n_warmup
+    
+    def update(self, x):
+        if self.n_warmup > 0:
+            self.n_warmup -= 1
+            return 0
+        else:
+            self.x_sum += x
+            self.x_count += 1
+            return self.avg()
+    
+    def avg(self):
+        if self.n_warmup > 0:
+            return 0
+        return self.x_sum / self.x_count
 
 class ModelRunner:
 
@@ -86,6 +105,14 @@ class ModelRunner:
             self.model_config.enforce_eager = True
         
         self.hip_refresh_interval = int(os.getenv('HIP_REFRESH_INTERVAL', '1'))
+        self.metrics = {
+            True: { # is prompt
+                'model': MetricTracer(),
+            },
+            False: { # is decoding
+                'model': MetricTracer(n_warmup=16),
+            }
+        }
 
     def load_model(self) -> None:
         with measure_cuda_memory() as m:
@@ -665,14 +692,16 @@ class ModelRunner:
         )
         if BENCHMARK_RUNNER: end_sample.record()
         
-        if BENCHMARK_RUNNER: 
+        if BENCHMARK_RUNNER:
             torch.cuda.synchronize()
             elapsed_prepare = start_prepare.elapsed_time(end_prepare)
             elapsed_model = start_model.elapsed_time(end_model)
             elapsed_sample = start_sample.elapsed_time(end_sample)
             elapsed_total = (time.time() - t_start) * 1000
             
-            print(f'[{time.time() * 1000:.3f}][{len(seq_group_metadata_list) if seq_group_metadata_list is not None else None}](is_prompt: {is_prompt}) prepare: {elapsed_prepare:.3f}, model: {elapsed_model:.3f}, sample: {elapsed_sample:.3f}, total: {elapsed_total:.3f}')
+            if seq_group_metadata_list is not None:
+                # in main process
+                print(f'[{time.time() * 1000:.3f}][{len(seq_group_metadata_list) if seq_group_metadata_list is not None else None}](is_prompt: {is_prompt}) prepare: {elapsed_prepare:.3f}, model: {elapsed_model:.3f}({self.metrics[is_prompt]["model"].update(elapsed_model):.3f}), sample: {elapsed_sample:.3f}, total: {elapsed_total:.3f}')
         
         return output
 
