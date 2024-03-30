@@ -23,6 +23,8 @@ from vllm.lora.worker_manager import LRUCacheWorkerLoRAManager
 from vllm.lora.layers import LoRAMapping
 from vllm.lora.request import LoRARequest
 from vllm.utils import in_wsl, measure_cuda_memory
+from vllm.model_executor.layers.attention import Attention
+from vllm.model_executor.layers.attention.backends.hip import HipAttentionBackend
 
 logger = init_logger(__name__)
 
@@ -982,8 +984,6 @@ class CUDAGraphRunner:
         # NOTE(woosuk): Python 3.8 does not support multi-line with statements.
         # https://stackoverflow.com/questions/31039022/python-multi-line-with-statement
         if need_checkout_hip_caches:
-            from vllm.model_executor.layers.attention import Attention
-            from vllm.model_executor.layers.attention.backends.hip import HipAttentionBackend
             for m in self.model.modules():
                 if isinstance(m, Attention):
                     backend = m.backend # type: HipAttentionBackend
@@ -993,9 +993,6 @@ class CUDAGraphRunner:
                     backend.last_ks = None
         
         if self.using_precomputed_hip_mask:
-            from vllm.model_executor.layers.attention import Attention
-            from vllm.model_executor.layers.attention.backends.hip import HipAttentionBackend
-            
             assert not self.checkout_computed_hip_mask
             idx_module = 0
             for m in self.model.modules():
@@ -1008,9 +1005,6 @@ class CUDAGraphRunner:
                     backend.precomputed_ks = self.precomputed_hip_caches[idx_module][2]
                     idx_module += 1
         else:
-            from vllm.model_executor.layers.attention import Attention
-            from vllm.model_executor.layers.attention.backends.hip import HipAttentionBackend
-            
             for m in self.model.modules():
                 if isinstance(m, Attention):
                     backend = m.backend # type: HipAttentionBackend
@@ -1041,8 +1035,6 @@ class CUDAGraphRunner:
         torch.cuda.synchronize()
         
         if need_checkout_hip_caches:
-            from vllm.model_executor.layers.attention import Attention
-            from vllm.model_executor.layers.attention.backends.hip import HipAttentionBackend
             last_hip_caches = []
             for name, m in self.model.named_modules():
                 if isinstance(m, Attention):
@@ -1058,7 +1050,18 @@ class CUDAGraphRunner:
                     
                     backend.last_indices = None
                     backend.last_ks = None
-
+        
+        for m in self.model.modules():
+            if isinstance(m, Attention):
+                backend = m.backend
+                if isinstance(backend, HipAttentionBackend):
+                    backend.checkout_last = False
+                    backend.using_precomputed_mask = False
+                    backend.last_indices = None
+                    backend.last_ks = None
+                    backend.precomputed_indices = None
+                    backend.precomputed_ks = None
+        
         # Save the input and output buffers.
         self.input_buffers = {
             "input_ids": input_ids,
