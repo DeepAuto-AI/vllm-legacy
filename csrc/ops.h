@@ -17,17 +17,20 @@ void paged_attention_v1(
   const std::string& kv_cache_dtype);
 
 void paged_attention_v2(
-  torch::Tensor& out,
-  torch::Tensor& exp_sums,
-  torch::Tensor& max_logits,
-  torch::Tensor& tmp_out,
-  torch::Tensor& query,
-  torch::Tensor& key_cache,
-  torch::Tensor& value_cache,
-  int num_kv_heads,
+  torch::Tensor& out,             // [num_seqs, num_heads, head_size]
+  torch::Tensor& exp_sums,        // [num_seqs, num_heads, max_num_partitions]
+  torch::Tensor& max_logits,      // [num_seqs, num_heads, max_num_partitions]
+  torch::Tensor& tmp_out,         // [num_seqs, num_heads, max_num_partitions, head_size]
+  torch::Tensor& query,           // [num_seqs, num_heads, head_size]
+  // torch::Tensor& key_cache,       // [num_blocks, num_heads, head_size/x, block_size, x]
+  const std::string& key_cache_data_ptr_str,
+  int key_cache_stride_0,
+  int key_cache_stride_1,
+  const std::string& value_cache_data_ptr_str,     // [num_blocks, num_heads, head_size, block_size]
+  int num_kv_heads,               // [num_heads]
   float scale,
-  torch::Tensor& block_tables,
-  torch::Tensor& context_lens,
+  torch::Tensor& block_tables,    // [num_seqs, max_num_blocks_per_seq]
+  torch::Tensor& context_lens,    // [num_seqs]
   int block_size,
   int max_context_len,
   const c10::optional<torch::Tensor>& alibi_slopes,
@@ -53,7 +56,25 @@ void rotary_embedding(
   torch::Tensor& cos_sin_cache,
   bool is_neox);
 
+void batched_rotary_embedding(
+  torch::Tensor& positions,
+  torch::Tensor& query,
+  torch::Tensor& key,
+  int head_size,
+  torch::Tensor& cos_sin_cache,
+  bool is_neox,
+  int rot_dim,
+  torch::Tensor& cos_sin_cache_offsets);
+
 void silu_and_mul(
+  torch::Tensor& out,
+  torch::Tensor& input);
+
+void gelu_and_mul(
+  torch::Tensor& out,
+  torch::Tensor& input);
+
+void gelu_tanh_and_mul(
   torch::Tensor& out,
   torch::Tensor& input);
 
@@ -80,6 +101,15 @@ torch::Tensor awq_dequantize(
     int split_k_iters,
     int thx,
     int thy);
+
+torch::Tensor marlin_gemm(
+    torch::Tensor& a, 
+    torch::Tensor& b_q_weight,
+    torch::Tensor& b_scales, 
+    torch::Tensor& workspace,
+    int64_t size_m, 
+    int64_t size_n, 
+    int64_t size_k);
 #endif
 
 void squeezellm_gemm(
@@ -94,11 +124,13 @@ torch::Tensor gptq_gemm(
   torch::Tensor b_gptq_qzeros,
   torch::Tensor b_gptq_scales,
   torch::Tensor b_g_idx,
-  bool use_exllama);
+  bool use_exllama,
+  int bit);
 
 void gptq_shuffle(
   torch::Tensor q_weight,
-  torch::Tensor q_perm);
+  torch::Tensor q_perm,
+  int bit);
 
 void moe_align_block_size(
   torch::Tensor topk_ids,

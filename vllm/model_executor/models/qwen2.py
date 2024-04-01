@@ -22,6 +22,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 """Inference-only Qwen2 model compatible with HuggingFace weights."""
+import os
 from typing import List, Optional, Tuple
 
 import torch
@@ -30,7 +31,7 @@ from transformers import Qwen2Config
 
 from vllm.model_executor.input_metadata import InputMetadata
 from vllm.model_executor.layers.activation import SiluAndMul
-from vllm.model_executor.layers.attention import PagedAttention
+from vllm.model_executor.layers.attention import Attention
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.linear import (LinearMethodBase,
                                                MergedColumnParallelLinear,
@@ -46,6 +47,7 @@ from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.model_executor.weight_utils import (default_weight_loader,
                                               hf_model_weights_iterator)
 from vllm.sequence import SamplerOutput
+from vllm.config import LoRAConfig
 
 KVCache = Tuple[torch.Tensor, torch.Tensor]
 
@@ -138,7 +140,7 @@ class Qwen2Attention(nn.Module):
             max_position=max_position,
             base=self.rope_theta,
         )
-        self.attn = PagedAttention(
+        self.attn = Attention(
             self.num_heads,
             self.head_dim,
             self.scaling,
@@ -146,7 +148,8 @@ class Qwen2Attention(nn.Module):
             sliding_window=self.sliding_window,
             layer_index=layer_index,
         )
-
+        self.rope_method = os.getenv('HIP_ROPE_METHOD', 'none')
+    
     def forward(
         self,
         positions: torch.Tensor,
@@ -154,11 +157,35 @@ class Qwen2Attention(nn.Module):
         kv_cache: KVCache,
         input_metadata: InputMetadata,
     ) -> torch.Tensor:
+        # qkv, _ = self.qkv_proj(hidden_states)
+        # q, k, v = qkv.split([self.q_size, self.kv_size, self.kv_size], dim=-1)
+        # q, k = self.rotary_emb(positions, q, k)
+        # k_cache, v_cache = kv_cache
+        # attn_output = self.attn(q, k, v, k_cache, v_cache, input_metadata)
+        # output, _ = self.o_proj(attn_output)
+        # return output
+        
         qkv, _ = self.qkv_proj(hidden_states)
         q, k, v = qkv.split([self.q_size, self.kv_size, self.kv_size], dim=-1)
-        q, k = self.rotary_emb(positions, q, k)
         k_cache, v_cache = kv_cache
-        attn_output = self.attn(q, k, v, k_cache, v_cache, input_metadata)
+        
+        if self.rope_method == 'none':
+            q, k = self.rotary_emb(positions, q, k)
+            attn_output = self.attn(q, k, v, k_cache, v_cache, input_metadata, rope_method=self.rope_method)
+        elif self.rope_method == 'self_extend':
+            cos, sin = self.rotary_emb.get_cos_sin_cache()
+            position_ids = positions
+            attn_output = self.attn(
+                q, k, v, k_cache, v_cache, input_metadata,
+                
+                rope_method=self.rope_method,
+                rope_cos=cos,
+                rope_sin=sin,
+                position_ids=position_ids,
+            )
+        else:
+            raise Exception()
+        
         output, _ = self.o_proj(attn_output)
         return output
 
@@ -175,7 +202,8 @@ class Qwen2DecoderLayer(nn.Module):
         self.hidden_size = config.hidden_size
         # Requires transformers > 4.32.0
         rope_theta = getattr(config, "rope_theta", 1000000)
-        use_sliding_window = config.use_sliding_window and layer_idx < config.max_window_layers
+        use_sliding_window = (config.use_sliding_window
+                              and layer_idx < config.max_window_layers)
         self.self_attn = Qwen2Attention(
             hidden_size=self.hidden_size,
             num_heads=config.num_attention_heads,
@@ -272,12 +300,35 @@ class Qwen2Model(nn.Module):
 
 
 class Qwen2ForCausalLM(nn.Module):
+    packed_modules_mapping = {
+        "qkv_proj": [
+            "q_proj",
+            "k_proj",
+            "v_proj",
+        ],
+        "gate_up_proj": [
+            "gate_proj",
+            "up_proj",
+        ],
+    }
+
+    # LoRA specific attributes
+    supported_lora_modules = [
+        "qkv_proj",
+        "o_proj",
+        "gate_up_proj",
+        "down_proj",
+    ]
+    embedding_modules = {}
+    embedding_padding_modules = []
 
     def __init__(
         self,
         config: Qwen2Config,
         linear_method: Optional[LinearMethodBase] = None,
+        lora_config: Optional[LoRAConfig] = None,
     ) -> None:
+        del lora_config
         super().__init__()
         self.config = config
         self.linear_method = linear_method
