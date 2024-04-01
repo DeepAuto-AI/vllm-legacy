@@ -1,4 +1,5 @@
 import os
+import contextlib
 import time
 from typing import Dict, List, Optional, Tuple, Set, Union
 
@@ -6,18 +7,24 @@ import numpy as np
 import torch
 import torch.nn as nn
 
-from vllm.config import DeviceConfig, ModelConfig, LoRAConfig, ParallelConfig, SchedulerConfig
+from vllm.config import (DeviceConfig, ModelConfig, LoRAConfig, ParallelConfig,
+                         SchedulerConfig)
 from vllm.logger import init_logger
 from vllm.model_executor import get_model, InputMetadata, SamplingMetadata
+from vllm.model_executor.parallel_utils import cupy_utils
 from vllm.model_executor.parallel_utils.communication_op import (
     broadcast_tensor_dict)
+from vllm.model_executor.parallel_utils.parallel_state import (
+    with_cupy_nccl_for_all_reduce)
 from vllm.model_executor.parallel_utils import custom_all_reduce
 from vllm.sampling_params import SamplingParams, SamplingType
 from vllm.sequence import SamplerOutput, SequenceData, SequenceGroupMetadata
 from vllm.lora.worker_manager import LRUCacheWorkerLoRAManager
 from vllm.lora.layers import LoRAMapping
 from vllm.lora.request import LoRARequest
-from vllm.utils import in_wsl
+from vllm.utils import in_wsl, measure_cuda_memory
+from vllm.model_executor.layers.attention import Attention
+from vllm.model_executor.layers.attention.backends.hip import HipAttentionBackend
 
 logger = init_logger(__name__)
 
@@ -28,6 +35,25 @@ LORA_WARMUP_RANK = 8
 # NOTE: _get_graph_batch_size needs to be updated if this list is changed.
 _BATCH_SIZES_TO_CAPTURE = [1, 2, 4] + [8 * i for i in range(1, 33)]
 
+class MetricTracer:
+    def __init__(self, n_warmup = 0):
+        self.x_sum = 0
+        self.x_count = 0
+        self.n_warmup = n_warmup
+    
+    def update(self, x):
+        if self.n_warmup > 0:
+            self.n_warmup -= 1
+            return 0
+        else:
+            self.x_sum += x
+            self.x_count += 1
+            return self.avg()
+    
+    def avg(self):
+        if self.n_warmup > 0:
+            return 0
+        return self.x_sum / self.x_count
 
 class ModelRunner:
 
@@ -59,7 +85,7 @@ class ModelRunner:
         self.block_size = None  # Set after initial profiling.
         self.lora_manager = None
 
-        self.graph_runners: Dict[int, CUDAGraphRunner] = {}
+        self.graph_runners: Dict[int, Union[CUDAGraphRunner, HipGraphRunnerCounter]] = {}
         self.graph_memory_pool = None  # Set during graph capture.
 
         self.max_context_len_to_capture = (
@@ -76,18 +102,47 @@ class ModelRunner:
         self.in_wsl = in_wsl()
         self.kv_cache_dtype = kv_cache_dtype
 
-    def load_model(self) -> None:
-        self.model = get_model(self.model_config, self.device_config,
-                               self.lora_config)
+        # Set enforce_eager to True for Neuron backend, to avoid capturing graph
+        if self.device_config.is_neuron:
+            self.model_config.enforce_eager = True
+        
+        self.hip_refresh_interval = int(os.getenv('HIP_REFRESH_INTERVAL', '1'))
+        self.metrics = {
+            True: { # is prompt
+                'model': MetricTracer(),
+            },
+            False: { # is decoding
+                'model': MetricTracer(n_warmup=16),
+            }
+        }
 
-        vocab_size = self.model.config.vocab_size
+    def load_model(self) -> None:
+        with measure_cuda_memory() as m:
+            self.model = get_model(self.model_config,
+                                   self.device_config,
+                                   lora_config=self.lora_config,
+                                   parallel_config=self.parallel_config,
+                                   scheduler_config=self.scheduler_config)
+
+        self.model_memory_usage = m.consumed_memory
+        logger.info(f"Loading model weights took "
+                    f"{self.model_memory_usage / float(2**30):.4f} GB")
 
         if self.lora_config:
+            assert hasattr(self.model, "supported_lora_modules"
+                           ) and self.model.supported_lora_modules, (
+                               "Model does not support LoRA")
+            assert hasattr(
+                self.model,
+                "embedding_modules"), "Model does not have embedding_modules"
+            assert hasattr(self.model, "embedding_padding_modules"
+                           ), "Model does not have embedding_padding_modules"
             self.lora_manager = LRUCacheWorkerLoRAManager(
                 self.scheduler_config.max_num_seqs,
                 self.scheduler_config.max_num_batched_tokens +
-                self.scheduler_config.max_paddings, vocab_size,
-                self.lora_config, self.device)
+                self.scheduler_config.max_paddings, self.vocab_size,
+                self.lora_config, self.device, self.model.embedding_modules,
+                self.model.embedding_padding_modules)
             self.model = self.lora_manager.create_lora_manager(self.model)
 
     def set_block_size(self, block_size: int) -> None:
@@ -125,33 +180,37 @@ class ModelRunner:
             prompt_tokens = seq_data.get_token_ids()
             prompt_len = len(prompt_tokens)
             prompt_lens.append(prompt_len)
-            prefix_len = 0
-            prefix = seq_group_metadata.prefix
-            if prefix is not None and prefix.computed:
-                prefix_len = prefix.get_length()
-                prompt_tokens = prompt_tokens[prefix_len:]
-                prefix_block_tables.append(prefix.get_block_numbers())
+            computed_len = 0
+
+            # NOTE: This only works for oooooooxxx style attention.
+            computed_block_nums = seq_group_metadata.computed_block_nums
+            if computed_block_nums is not None and len(
+                    computed_block_nums) > 0 and self.sliding_window is None:
+                # Prefix is not supported with sliding_window
+                computed_len = len(computed_block_nums) * self.block_size
+                prompt_tokens = prompt_tokens[computed_len:]
+                prefix_block_tables.append(computed_block_nums)
             else:
                 prefix_block_tables.append([])
             # actual prompt lens
-            context_lens.append(prefix_len)
-            subquery_lens.append(prompt_len - prefix_len)
+            context_lens.append(computed_len)
+            subquery_lens.append(prompt_len - computed_len)
 
             input_tokens.append(prompt_tokens)
             # NOTE(woosuk): Here we assume that the first token in the prompt
             # is always the first token in the sequence.
             input_positions.append(
-                list(range(prefix_len, prefix_len + len(prompt_tokens))))
+                list(range(computed_len, computed_len + len(prompt_tokens))))
 
             lora_id = seq_group_metadata.lora_int_id
 
             if lora_id > 0:
                 lora_requests.add(seq_group_metadata.lora_request)
 
-            lora_index_mapping.append([lora_id] * (prompt_len - prefix_len))
+            lora_index_mapping.append([lora_id] * (prompt_len - computed_len))
             lora_prompt_mapping.extend(
                 [lora_id] *
-                (prompt_len - prefix_len
+                (prompt_len - computed_len
                  if seq_group_metadata.sampling_params.prompt_logprobs else 1))
 
             if seq_group_metadata.block_tables is None:
@@ -170,11 +229,11 @@ class ModelRunner:
             # mapping will be [-1, -1, 2, 3, 4, 5, 6, 7, 0, 1].
             start_idx = 0
             if self.sliding_window is not None:
-                assert prefix_len == 0, (
+                assert computed_len == 0, (
                     "Prefix caching is currently not supported with "
                     "sliding window attention")
                 start_idx = max(0, prompt_len - self.sliding_window)
-            for i in range(prefix_len, prompt_len):
+            for i in range(computed_len, prompt_len):
                 if i < start_idx:
                     slot_mapping[-1].append(_PAD_SLOT_ID)
                     continue
@@ -185,6 +244,7 @@ class ModelRunner:
                 slot_mapping[-1].append(slot)
 
         max_prompt_len = max(subquery_lens)
+        assert max_prompt_len > 0
         input_tokens = _make_tensor_with_pad(input_tokens,
                                              max_prompt_len,
                                              pad=0,
@@ -376,9 +436,11 @@ class ModelRunner:
     ) -> SamplingMetadata:
         seq_groups: List[Tuple[List[int], SamplingParams]] = []
         selected_token_indices: List[int] = []
+        generators: List[torch.Generator] = []
         selected_token_start_idx = 0
         categorized_sample_indices = {t: [] for t in SamplingType}
         categorized_sample_indices_start_idx = 0
+        pin_memory = not self.in_wsl and not self.device_config.is_neuron
 
         max_subquery_len = max(subquery_lens) if subquery_lens else 1
         for i, seq_group_metadata in enumerate(seq_group_metadata_list):
@@ -406,6 +468,10 @@ class ModelRunner:
                 selected_token_indices.append(selected_token_start_idx +
                                               subquery_len - 1)
                 selected_token_start_idx += max_subquery_len
+
+                if sampling_params.seed is not None:
+                    seq_group_metadata.state.generator = torch.Generator(
+                        device="cuda").manual_seed(sampling_params.seed)
             else:
                 num_seqs = len(seq_ids)
                 selected_token_indices.extend(
@@ -419,15 +485,18 @@ class ModelRunner:
                               categorized_sample_indices_start_idx + num_seqs))
                 categorized_sample_indices_start_idx += num_seqs
 
+            if sampling_params.seed is not None:
+                generators.append(seq_group_metadata.state.generator)
+
         selected_token_indices = _async_h2d(selected_token_indices,
                                             dtype=torch.long,
                                             target_device=self.device,
-                                            pin_memory=not self.in_wsl)
+                                            pin_memory=pin_memory)
         categorized_sample_indices = {
             t: _async_h2d(seq_ids,
                           dtype=torch.int,
                           target_device=self.device,
-                          pin_memory=not self.in_wsl)
+                          pin_memory=pin_memory)
             for t, seq_ids in categorized_sample_indices.items()
         }
 
@@ -441,6 +510,7 @@ class ModelRunner:
             prompt_lens=prompt_lens,
             selected_token_indices=selected_token_indices,
             categorized_sample_indices=categorized_sample_indices,
+            generators=generators,
         )
         return sampling_metadata
 
@@ -523,6 +593,7 @@ class ModelRunner:
                 prompt_lens=None,
                 selected_token_indices=metadata_dict["selected_token_indices"],
                 categorized_sample_indices=None,
+                generators=None,
                 perform_sampling=False,
             )
 
@@ -565,17 +636,54 @@ class ModelRunner:
 
         if BENCHMARK_RUNNER: start_model.record()
         # Execute the model.
+        is_prompt = input_tokens.shape[-1] > 1
+        
+        # notify decoding
+        # prompt notification is in HiPAttentionBackend
+        for k_cache, v_cache in kv_caches:
+            if not is_prompt:
+                if hasattr(k_cache, 'decode_start'):
+                    k_cache.decode_start()
+                if hasattr(v_cache, 'decode_start'):
+                    v_cache.decode_start()
+        
         if input_metadata.use_cuda_graph:
             graph_batch_size = input_tokens.shape[0]
             model_executable = self.graph_runners[graph_batch_size]
+            if isinstance(model_executable, CUDAGraphRunner):
+                pass
+            elif isinstance(model_executable, HipGraphRunnerCounter):
+                model_executable = model_executable.get_next_graph()
+            else:
+                raise Exception()
         else:
+            # we counter the prompt
             model_executable = self.model
+            # reset cuda graphs caches
+            for runner in self.graph_runners.values():
+                if isinstance(runner, CUDAGraphRunner):
+                    runner.need_offload_prefetch = True
+                elif isinstance(runner, HipGraphRunnerCounter):
+                    runner.counter = 0
+                    runner.graph_checkout.need_offload_prefetch = True
+                    runner.graph_precomputed_mask.need_offload_prefetch = True
+                else:
+                    raise Exception()
+        
         hidden_states = model_executable(
             input_ids=input_tokens,
             positions=input_positions,
             kv_caches=kv_caches,
             input_metadata=input_metadata,
         )
+        
+        for k_cache, v_cache in kv_caches:
+            if not is_prompt:
+                if hasattr(k_cache, 'decode_end'):
+                    k_cache.decode_end()
+                if hasattr(v_cache, 'decode_end'):
+                    v_cache.decode_end()
+        
         if BENCHMARK_RUNNER: end_model.record()
 
         # Sample the next token.
@@ -586,22 +694,23 @@ class ModelRunner:
         )
         if BENCHMARK_RUNNER: end_sample.record()
         
-        if BENCHMARK_RUNNER: 
+        if BENCHMARK_RUNNER:
             torch.cuda.synchronize()
             elapsed_prepare = start_prepare.elapsed_time(end_prepare)
             elapsed_model = start_model.elapsed_time(end_model)
             elapsed_sample = start_sample.elapsed_time(end_sample)
             elapsed_total = (time.time() - t_start) * 1000
             
-            print(f'[{time.time() * 1000:.3f}] prepare: {elapsed_prepare:.3f}, model: {elapsed_model:.3f}, sample: {elapsed_sample:.3f}, total: {elapsed_total:.3f}')
+            if seq_group_metadata_list is not None:
+                # in main process
+                print(f'[{time.time() * 1000:.3f}][{len(seq_group_metadata_list) if seq_group_metadata_list is not None else None}](is_prompt: {is_prompt}) prepare: {elapsed_prepare:.3f}, model: {elapsed_model:.3f}({self.metrics[is_prompt]["model"].update(elapsed_model):.3f}), sample: {elapsed_sample:.3f}, total: {elapsed_total:.3f}')
         
         return output
 
     @torch.inference_mode()
     def profile_run(self) -> None:
         # Enable top-k sampling to reflect the accurate memory usage.
-        vocab_size = self.model_config.get_vocab_size()
-        sampling_params = SamplingParams(top_p=0.99, top_k=vocab_size - 1)
+        sampling_params = SamplingParams(top_p=0.99, top_k=self.vocab_size - 1)
         max_num_batched_tokens = self.scheduler_config.max_num_batched_tokens
         max_num_seqs = self.scheduler_config.max_num_seqs
 
@@ -680,6 +789,10 @@ class ModelRunner:
 
     @torch.inference_mode()
     def capture_model(self, kv_caches: List[KVCache]) -> None:
+        # NOTE(woosuk): This is a hack to ensure that the NCCL backend is never
+        # deleted before the CUDA graphs.
+        self.cupy_nccl_backend = cupy_utils.get_nccl_backend()
+
         assert not self.model_config.enforce_eager
         logger.info("Capturing the model for CUDA graphs. This may lead to "
                     "unexpected consequences if the model is not static. To "
@@ -708,10 +821,16 @@ class ModelRunner:
             bs for bs in _BATCH_SIZES_TO_CAPTURE if bs <= graph_batch_size
         ]
 
-        # NOTE: Capturing the largest batch size first may help reduce the
-        # memory usage of CUDA graph.
+        # NOTE(woosuk): There are 3 backends for all-reduce: custom all-reduce
+        # kernel, CuPy NCCL, and PyTorch NCCL. When using CUDA graph, we use
+        # either custom all-reduce kernel or CuPy NCCL. When not using CUDA
+        # graph, we use either custom all-reduce kernel or PyTorch NCCL.
+        # We always prioritize using custom all-reduce kernel but fall back
+        # to PyTorch or CuPy NCCL if it is disabled or not supported.
         logger.info(f'graph will capture batches {batch_size_capture_list}')
         with custom_all_reduce.capture():
+            # NOTE: Capturing the largest batch size first may help reduce the
+            # memory usage of CUDA graph.
             for batch_size in reversed(batch_size_capture_list):
                 # Create dummy input_metadata.
                 input_metadata = InputMetadata(
@@ -734,30 +853,120 @@ class ModelRunner:
                     )
                     self.set_active_loras(set(), lora_mapping)
 
-                graph_runner = CUDAGraphRunner(self.model)
-                graph_runner.capture(
-                    input_tokens[:batch_size],
-                    input_positions[:batch_size],
-                    kv_caches,
-                    input_metadata,
-                    memory_pool=self.graph_memory_pool,
-                )
-                self.graph_memory_pool = graph_runner.graph.pool()
-                self.graph_runners[batch_size] = graph_runner
+                if self.hip_refresh_interval > 1:
+                    graph_runner_checkout = CUDAGraphRunner(
+                        self.model,
+                        checkout_computed_hip_mask=True,
+                    )
+                    graph_runner_checkout.capture(
+                        input_tokens[:batch_size],
+                        input_positions[:batch_size],
+                        kv_caches,
+                        input_metadata,
+                        memory_pool=self.graph_memory_pool,
+                    )
+                    self.graph_memory_pool = graph_runner_checkout.graph.pool()
+                    
+                    graph_runner_precomputed_mask = CUDAGraphRunner(
+                        self.model,
+                        using_precomputed_hip_mask=True,
+                        precomputed_hip_caches=graph_runner_checkout.output_buffers['hip_caches'],
+                    )
+                    graph_runner_precomputed_mask.capture(
+                        input_tokens[:batch_size],
+                        input_positions[:batch_size],
+                        kv_caches,
+                        input_metadata,
+                        memory_pool=self.graph_memory_pool,
+                    )
+                    self.graph_memory_pool = graph_runner_precomputed_mask.graph.pool()
+                    
+                    self.graph_runners[batch_size] = HipGraphRunnerCounter(
+                        graph_runner_checkout, 
+                        graph_runner_precomputed_mask,
+                        self.hip_refresh_interval,
+                    )
+                else:
+                    graph_runner = CUDAGraphRunner(self.model)
+                    graph_runner.capture(
+                        input_tokens[:batch_size],
+                        input_positions[:batch_size],
+                        kv_caches,
+                        input_metadata,
+                        memory_pool=self.graph_memory_pool,
+                    )
+                    self.graph_memory_pool = graph_runner.graph.pool()
+                    self.graph_runners[batch_size] = graph_runner
 
         end_time = time.perf_counter()
         elapsed_time = end_time - start_time
         # This usually takes < 10 seconds.
         logger.info(f"Graph capturing finished in {elapsed_time:.0f} secs.")
 
+    def __del__(self) -> None:
+        # Delete the CUDA graphs before deleting the CuPy NCCL communicator.
+        # NOTE(woosuk): This is necessary because otherwise deadlocks can
+        # happen.
+        # FIXME(woosuk): This is a bit hacky. Find a more robust solution.
+        self.graph_runners.clear()
+        self.cupy_nccl_backend = None
+
+    @property
+    def vocab_size(self) -> int:
+        return self.model_config.get_vocab_size()
+
+class HipGraphRunnerCounter:
+    def __init__(
+        self, 
+        graph_checkout: "CUDAGraphRunner", 
+        graph_precomputed_mask: "CUDAGraphRunner",
+        refresh_interval: int,
+    ):
+        self.counter = 0
+        
+        self.refresh_interval = refresh_interval
+        
+        self.graph_checkout = graph_checkout
+        self.graph_precomputed_mask = graph_precomputed_mask
+        
+    def get_next_graph(self):
+        if (self.counter % self.refresh_interval) == 0:
+            graph = self.graph_checkout
+        else:
+            graph = self.graph_precomputed_mask
+        self.counter += 1
+        return graph
+
+HipCache = Tuple[
+    str,            #name
+    torch.Tensor,   #indices
+    torch.Tensor,   #ks
+    torch.Tensor,   #blocks
+]
 
 class CUDAGraphRunner:
 
-    def __init__(self, model: nn.Module):
+    def __init__(
+        self, 
+        model: nn.Module,
+        
+        checkout_computed_hip_mask: bool = False,
+        using_precomputed_hip_mask: bool = False,
+        precomputed_hip_caches: List[HipCache] = None,
+    ):
         self.model = model
         self.graph = None
         self.input_buffers: Dict[str, torch.Tensor] = {}
         self.output_buffers: Dict[str, torch.Tensor] = {}
+        
+        self.offload_prefetch = \
+            (os.getenv('OFFLOAD_PREFETCH', '0') == '1') and\
+            (os.getenv('CACHE_ENGINE', 'vllm') in ['offload_v', 'offload_kv'])
+        self.need_offload_prefetch = False
+        
+        self.checkout_computed_hip_mask = checkout_computed_hip_mask
+        self.using_precomputed_hip_mask = using_precomputed_hip_mask
+        self.precomputed_hip_caches = precomputed_hip_caches
 
     def capture(
         self,
@@ -767,29 +976,93 @@ class CUDAGraphRunner:
         input_metadata: InputMetadata,
         memory_pool,
     ) -> None:
+        need_checkout_hip_caches = self.offload_prefetch or self.checkout_computed_hip_mask
+        
         assert self.graph is None
+
+        # Capture the graph.
+        # NOTE(woosuk): Python 3.8 does not support multi-line with statements.
+        # https://stackoverflow.com/questions/31039022/python-multi-line-with-statement
+        if need_checkout_hip_caches:
+            for m in self.model.modules():
+                if isinstance(m, Attention):
+                    backend = m.backend # type: HipAttentionBackend
+                    assert isinstance(backend, HipAttentionBackend)
+                    backend.checkout_last = True
+                    backend.last_indices = None
+                    backend.last_ks = None
+        
+        if self.using_precomputed_hip_mask:
+            assert not self.checkout_computed_hip_mask
+            idx_module = 0
+            for m in self.model.modules():
+                if isinstance(m, Attention):
+                    backend = m.backend # type: HipAttentionBackend
+                    assert isinstance(backend, HipAttentionBackend)
+                    backend.using_precomputed_mask = True
+                    backend.checkout_last = False
+                    backend.precomputed_indices = self.precomputed_hip_caches[idx_module][1]
+                    backend.precomputed_ks = self.precomputed_hip_caches[idx_module][2]
+                    idx_module += 1
+        else:
+            for m in self.model.modules():
+                if isinstance(m, Attention):
+                    backend = m.backend # type: HipAttentionBackend
+                    if isinstance(backend, HipAttentionBackend):
+                        backend.using_precomputed_mask = False
+        
         # Run the model once without capturing the graph.
         # This is to make sure that the captured graph does not include the
         # kernel launches for initial benchmarking (e.g., Triton autotune).
-        self.model(
-            input_ids,
-            positions,
-            kv_caches,
-            input_metadata,
-        )
-        torch.cuda.synchronize()
-
-        # Capture the graph.
-        self.graph = torch.cuda.CUDAGraph()
-        with torch.cuda.graph(self.graph, pool=memory_pool):
-            hidden_states = self.model(
+        with _maybe_cupy_nccl():
+            self.model(
                 input_ids,
                 positions,
                 kv_caches,
                 input_metadata,
             )
         torch.cuda.synchronize()
-
+        
+        self.graph = torch.cuda.CUDAGraph()
+        with torch.cuda.graph(self.graph, pool=memory_pool):  # noqa: SIM117
+            with _maybe_cupy_nccl():
+                hidden_states = self.model(
+                    input_ids,
+                    positions,
+                    kv_caches,
+                    input_metadata,
+                )
+        torch.cuda.synchronize()
+        
+        if need_checkout_hip_caches:
+            last_hip_caches = []
+            for name, m in self.model.named_modules():
+                if isinstance(m, Attention):
+                    backend = m.backend # type: HipAttentionBackend
+                    backend.checkout_last = False
+                    
+                    last_hip_caches.append([
+                        name, 
+                        backend.last_indices, 
+                        backend.last_ks, 
+                        None,
+                    ])
+                    
+                    backend.last_indices = None
+                    backend.last_ks = None
+        
+        # after capture clear it
+        for m in self.model.modules():
+            if isinstance(m, Attention):
+                backend = m.backend
+                if isinstance(backend, HipAttentionBackend):
+                    backend.checkout_last = False
+                    backend.using_precomputed_mask = False
+                    backend.last_indices = None
+                    backend.last_ks = None
+                    backend.precomputed_indices = None
+                    backend.precomputed_ks = None
+        
         # Save the input and output buffers.
         self.input_buffers = {
             "input_ids": input_ids,
@@ -800,6 +1073,8 @@ class CUDAGraphRunner:
             "block_tables": input_metadata.block_tables,
         }
         self.output_buffers = {"hidden_states": hidden_states}
+        if need_checkout_hip_caches:
+            self.output_buffers['hip_caches'] = last_hip_caches
         return
 
     def forward(
@@ -811,25 +1086,127 @@ class CUDAGraphRunner:
     ) -> torch.Tensor:
         # KV caches are fixed tensors, so we don't need to copy them.
         del kv_caches
+        
+        benchmark_graph_runner = os.getenv('BENCHMARK_GRAPH_RUNNER', '0') == '1'
+        
+        if benchmark_graph_runner:
+            start_prepare = torch.cuda.Event(enable_timing=True)
+            end_prepare = torch.cuda.Event(enable_timing=True)
+            start_replay = torch.cuda.Event(enable_timing=True)
+            end_replay = torch.cuda.Event(enable_timing=True)
+            start_post = torch.cuda.Event(enable_timing=True)
+            end_post = torch.cuda.Event(enable_timing=True)
+            
+            start_prepare.record()
+        
+        # prefetch previously accessed tokens
+        if self.offload_prefetch and self.need_offload_prefetch:
+            from vllm.model_executor.layers.attention import Attention
+            from vllm.model_executor.layers.attention.backends.hip import HipAttentionBackend
+            from vllm.worker.cache_engine.map_cache_engine import MapCacheEngine, ManagedTensor
+            kv_caches = self.input_buffers['kv_caches']
+            hip_caches = self.output_buffers['hip_caches']
+            
+            # prefetch KV
+            torch.cuda.synchronize(torch.cuda.current_device())
+            t = time.time()
+            
+            for kv_cache, hip_cache in zip(kv_caches, hip_caches):
+                _, v_cache = kv_cache
+                if isinstance(v_cache, ManagedTensor):
+                    name, indices, ks, cpu_indices = hip_cache
+                    if (cpu_indices is not None):
+                        v_cache.prefetch_blocks(cpu_indices, v_cache.target_device)
+                        hip_cache[-1] = None
+                        self.need_offload_prefetch = False
+            
+            torch.cuda.synchronize(torch.cuda.current_device())
+            
+            print(f'prefetch v: {(time.time() - t)*1000:.3f} ms')
+            # prefetch K
 
         # Copy the input tensors to the input buffers.
         self.input_buffers["input_ids"].copy_(input_ids, non_blocking=True)
         self.input_buffers["positions"].copy_(positions, non_blocking=True)
-        self.input_buffers["slot_mapping"].copy_(input_metadata.slot_mapping,
-                                                 non_blocking=True)
-        self.input_buffers["context_lens"].copy_(input_metadata.context_lens,
-                                                 non_blocking=True)
-        self.input_buffers["block_tables"].copy_(input_metadata.block_tables,
-                                                 non_blocking=True)
+        self.input_buffers["slot_mapping"].copy_(
+            input_metadata.slot_mapping, non_blocking=True
+        )
+        self.input_buffers["context_lens"].copy_(
+            input_metadata.context_lens, non_blocking=True
+        )
+        self.input_buffers["block_tables"].copy_(
+            input_metadata.block_tables, non_blocking=True
+        )
+        
+        if benchmark_graph_runner:
+            end_prepare.record()
+            start_replay.record()
 
         # Run the graph.
         self.graph.replay()
+
+        if benchmark_graph_runner:
+            end_replay.record()
+            start_post.record()
+        
+        if self.offload_prefetch and self.need_offload_prefetch:
+            kv_caches = self.input_buffers['kv_caches']
+            hip_caches = self.output_buffers['hip_caches']
+            for kv_cache, hip_cache in zip(kv_caches, hip_caches):
+                k_cache, v_cache = kv_cache
+                name, indices, ks, _ = hip_cache
+                if \
+                    (isinstance(k_cache, ManagedTensor) or isinstance(v_cache, ManagedTensor)) and\
+                    (indices is not None and ks is not None):
+                    batch_size, seq_len = input_ids.shape
+                    block_size = 16
+                    
+                    N_H, TDST, K = indices.shape
+                    N = batch_size
+                    H = N_H // batch_size
+                    
+                    indices = indices.view(N, H, TDST, K)
+                    
+                    block_indices_batch = []
+                    
+                    table = input_metadata.block_tables
+                    
+                    for ibatch in range(N):
+                        block_indices = (indices[ibatch] // block_size).view(-1)
+                        block_indices = torch.unique(block_indices)
+                        # print('marker1112:', block_indices.shape[0])
+                        block_indices = torch.clamp(block_indices, 0, table.shape[-1] - 1).to(torch.int64)
+                        block_indices = table[ibatch].gather(0, index=block_indices)
+                        assert block_indices.ndim == 1
+                        block_indices_batch.append(block_indices)
+                    
+                    block_indices = torch.concat(block_indices_batch).sort().values.to('cpu', non_blocking=True)
+                    
+                    hip_cache[-1] = block_indices
+
+        if benchmark_graph_runner:
+            end_post.record()
+            torch.cuda.synchronize()
+            
+            elapsed_prepare = start_prepare.elapsed_time(end_prepare)
+            elapsed_replay = start_replay.elapsed_time(end_replay)
+            elapsed_post = start_post.elapsed_time(end_post)
+            print(f'[{time.time() * 1000:.3f}] CUDAGraphRunner.forward: prepare: {elapsed_prepare:.3f}, replay: {elapsed_replay:.3f}, post: {elapsed_post:.3f}')
 
         # Return the output tensor.
         return self.output_buffers["hidden_states"]
 
     def __call__(self, *args, **kwargs):
         return self.forward(*args, **kwargs)
+
+
+@contextlib.contextmanager
+def _maybe_cupy_nccl():
+    if cupy_utils.is_initialized() and not custom_all_reduce.is_initialized():
+        with with_cupy_nccl_for_all_reduce():
+            yield
+    else:
+        yield
 
 
 def _pad_to_max(x: List[int], max_len: int, pad: int) -> List[int]:
