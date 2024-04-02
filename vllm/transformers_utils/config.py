@@ -16,11 +16,11 @@ _CONFIG_REGISTRY = {
 
 logger = init_logger(__name__)
 
+
 def get_config(model: str,
                trust_remote_code: bool,
                revision: Optional[str] = None,
                code_revision: Optional[str] = None) -> PretrainedConfig:
-    global FORCE_SIGNLE_LAYER
     # FIXME(woosuk): This is a temporary fix for StarCoder2.
     # Remove this when the model is supported by HuggingFace transformers.
     if "bigcode" in model and "starcoder2" in model:
@@ -50,12 +50,7 @@ def get_config(model: str,
     if config.model_type in _CONFIG_REGISTRY:
         config_class = _CONFIG_REGISTRY[config.model_type]
         config = config_class.from_pretrained(model, revision=revision, code_revision=code_revision)
-    
-    # NOTE: DEBUG
-    if FORCE_SIGNLE_LAYER > 0:
-        assert isinstance(FORCE_SIGNLE_LAYER, int)
-        config.num_hidden_layers = FORCE_SIGNLE_LAYER
-    
+
     if 'timber' in [os.getenv('PAGED_ATTENTION_BACKEND', 'timber'), os.getenv('PROMPT_ATTENTION_BACKEND', 'timber')] and hasattr(config, 'sliding_window'):
         logger.info(f'sliding window ({config.sliding_window}) disabled -> {config.max_position_embeddings}')
         config.sliding_window = config.max_position_embeddings
