@@ -27,6 +27,8 @@ INTERNLM_XCOMPOSER2_TEMPLATE = (
 def make_prompt(request: ChatCompletionRequest,
                 tokenizer: PreTrainedTokenizer):
 
+    images = []
+
     for msg in request.messages:
         if msg['role'] == 'system' and msg['content'] == "":
             msg['content'] = DEFAULT_SYSTEM_PROMPT
@@ -39,8 +41,11 @@ def make_prompt(request: ChatCompletionRequest,
             # Convert base64 to bytesIO
             file = BytesIO(b64decode(base64_string, validate=True))
             if mime_type.startswith('image/'):
-                image = Image.open(file)
+                image = Image.open(file).convert('RGB')
                 # TODO: encode image to tokens
+                if image.size != (16, 16):
+                    images.append(image)
+                    return "[[IMAGE_GOES_HERE]]"
                 return display_text
             elif mime_type == "application/pdf":
                 texts = read_doc(file, mime_type)
@@ -65,4 +70,4 @@ def make_prompt(request: ChatCompletionRequest,
         tokenize=False,
         add_generation_prompt=request.add_generation_prompt)
 
-    return prompt
+    return prompt, images

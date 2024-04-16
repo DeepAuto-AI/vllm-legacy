@@ -35,15 +35,22 @@ class PLoRA(nn.Module):
         self.lora_len = lora_len
         self.lora_scaling = self.lora_alpha / self.lora_r
         self.linear = linear_layer
-        self.Plora_A = RowParallelLinear(in_features, self.lora_r, bias=False)
-        self.Plora_B = ColumnParallelLinear(self.lora_r, out_features, bias=False)
+        if isinstance(linear_layer, ColumnParallelLinear):
+            self.Plora_A = torch.nn.Linear(in_features, self.lora_r, bias=False)
+            self.Plora_B = ColumnParallelLinear(self.lora_r, out_features, bias=False)
+        else:
+            self.Plora_A = RowParallelLinear(in_features, self.lora_r, bias=False)
+            self.Plora_B = torch.nn.Linear(self.lora_r, out_features, bias=False)
 
     def forward(self, x, im_mask=None):
-        res = self.linear(x)
+        res, bias = self.linear(x)
         if im_mask is not None:
-            part_x = x[im_mask]
-            res[im_mask] += self.Plora_B(self.Plora_A(part_x)) * self.lora_scaling
-        return res
+            x = self.Plora_A(x)
+            x = x[0] if isinstance(x, tuple) else x
+            x = self.Plora_B(x)
+            x = x[0] if isinstance(x, tuple) else x
+            res = torch.where(im_mask[..., None], res, res + x * self.lora_scaling)
+        return res, bias
 
 
 class InternLM2MLP(nn.Module):
@@ -85,11 +92,11 @@ class InternLM2MLP(nn.Module):
                              "Only silu is supported for now.")
         self.act_fn = SiluAndMul()
 
-    def forward(self, x):
-        gate_up_1, _ = self.w1(x)
-        gate_up_3, _ = self.w3(x)
+    def forward(self, x, im_mask=None):
+        gate_up_1, _ = self.w1(x, im_mask)
+        gate_up_3, _ = self.w3(x, im_mask)
         x = self.act_fn(torch.cat([gate_up_1, gate_up_3], dim=-1))
-        x, _ = self.w2(x)
+        x, _ = self.w2(x, im_mask)
         return x
 
 
@@ -143,7 +150,7 @@ class InternLM2Attention(nn.Module):
             8, 16, 0
         )
         self.wo = PLoRA(
-            self.num_heads * self.head_dim,
+            self.total_num_heads * self.head_dim,
             hidden_size,
             RowParallelLinear(
                 self.total_num_heads * self.head_dim,
@@ -171,15 +178,16 @@ class InternLM2Attention(nn.Module):
         self,
         positions: torch.Tensor,
         hidden_states: torch.Tensor,
+        im_mask: Optional[torch.Tensor],
         kv_cache: KVCache,
         input_metadata: InputMetadata,
     ) -> torch.Tensor:
-        qkv, _ = self.wqkv(hidden_states)
+        qkv, _ = self.wqkv(hidden_states, im_mask)
         q, k, v = qkv.split([self.q_size, self.kv_size, self.kv_size], dim=-1)
         q, k = self.rotary_emb(positions, q, k)
         k_cache, v_cache = kv_cache
         attn_output = self.attn(q, k, v, k_cache, v_cache, input_metadata)
-        output, _ = self.wo(attn_output)
+        output, _ = self.wo(attn_output, im_mask)
         return output
 
 
@@ -221,6 +229,7 @@ class InternLMDecoderLayer(nn.Module):
         self,
         positions: torch.Tensor,
         hidden_states: torch.Tensor,
+        im_mask: Optional[torch.Tensor],
         kv_cache: KVCache,
         input_metadata: InputMetadata,
         residual: Optional[torch.Tensor],
@@ -235,13 +244,14 @@ class InternLMDecoderLayer(nn.Module):
         hidden_states = self.attention(
             positions=positions,
             hidden_states=hidden_states,
+            im_mask=im_mask,
             kv_cache=kv_cache,
             input_metadata=input_metadata,
         )
 
         # Fully Connected
         hidden_states, residual = self.ffn_norm(hidden_states, residual)
-        hidden_states = self.feed_forward(hidden_states)
+        hidden_states = self.feed_forward(hidden_states, im_mask)
         return hidden_states, residual
 
 
@@ -269,17 +279,22 @@ class InternLM2Model(nn.Module):
     def forward(
         self,
         input_ids: torch.Tensor,
+        input_embeds: Optional[torch.Tensor],
+        input_im_masks: Optional[torch.Tensor],
         positions: torch.Tensor,
         kv_caches: List[KVCache],
         input_metadata: InputMetadata,
     ) -> torch.Tensor:
         hidden_states = self.tok_embeddings(input_ids)
+        if input_embeds is not None:
+            hidden_states = input_embeds.to(hidden_states.dtype)
         residual = None
         for i in range(len(self.layers)):
             layer = self.layers[i]
             hidden_states, residual = layer(
                 positions,
                 hidden_states,
+                input_im_masks,
                 kv_caches[i],
                 input_metadata,
                 residual,
@@ -308,8 +323,11 @@ class InternLM2ForCausalLM(nn.Module):
         positions: torch.Tensor,
         kv_caches: List[KVCache],
         input_metadata: InputMetadata,
+        input_embeds: Optional[torch.Tensor] = None,
+        input_im_masks: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
-        hidden_states = self.model(input_ids, positions, kv_caches,
+        input_im_masks = input_im_masks.bool() if input_im_masks is not None else None
+        hidden_states = self.model(input_ids, input_embeds, input_im_masks, positions, kv_caches,
                                    input_metadata)
         return hidden_states
 

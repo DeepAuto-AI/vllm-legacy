@@ -98,11 +98,15 @@ class SequenceData:
         self,
         prompt_token_ids: List[int],
         output_token_ids: Optional[List[int]] = None,
+        prompt_embeds: Optional["torch.Tensor"] = None,
+        prompt_im_masks: Optional[List[int]] = None,
     ) -> None:
         if output_token_ids is None:
             output_token_ids = []
 
         self.prompt_token_ids = prompt_token_ids
+        self.prompt_embeds = prompt_embeds
+        self.prompt_im_masks = prompt_im_masks
         self.output_token_ids = output_token_ids
         self.cumulative_logprob = 0.0
 
@@ -160,6 +164,8 @@ class Sequence:
         block_size: int,
         eos_token_id: Optional[int] = None,
         lora_request: Optional[LoRARequest] = None,
+        prompt_embeds: Optional["torch.Tensor"] = None,
+        prompt_im_masks: Optional[List[int]] = None,
     ) -> None:
         self.seq_id = seq_id
         self.prompt = prompt
@@ -167,7 +173,7 @@ class Sequence:
         self.eos_token_id = eos_token_id
         self.lora_request = lora_request
 
-        self.data = SequenceData(prompt_token_ids)
+        self.data = SequenceData(prompt_token_ids, prompt_embeds=prompt_embeds, prompt_im_masks=prompt_im_masks)
         self.output_logprobs: SampleLogprobs = []
         self.output_text = ""
 

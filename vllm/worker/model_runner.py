@@ -156,10 +156,13 @@ class ModelRunner:
     def _prepare_prompt(
         self,
         seq_group_metadata_list: List[SequenceGroupMetadata],
-    ) -> Tuple[torch.Tensor, torch.Tensor, InputMetadata, List[int], List[int],
+    ) -> Tuple[torch.Tensor, Optional[torch.Tensor], Optional[torch.Tensor],
+               torch.Tensor, InputMetadata, List[int], List[int],
                List[int], List[int], Set[LoRARequest]]:
         assert len(seq_group_metadata_list) > 0
         input_tokens: List[List[int]] = []
+        input_embeds: List[torch.Tensor] = []
+        input_im_masks: List[List[int]] = []
         input_positions: List[List[int]] = []
         slot_mapping: List[List[int]] = []
         lora_index_mapping: List[int] = []
@@ -178,6 +181,8 @@ class ModelRunner:
 
             seq_data = seq_group_metadata.seq_data[seq_id]
             prompt_tokens = seq_data.get_token_ids()
+            prompt_embeds = seq_data.prompt_embeds
+            prompt_im_masks = seq_data.prompt_im_masks
             prompt_len = len(prompt_tokens)
             prompt_lens.append(prompt_len)
             computed_len = 0
@@ -197,6 +202,8 @@ class ModelRunner:
             subquery_lens.append(prompt_len - computed_len)
 
             input_tokens.append(prompt_tokens)
+            input_embeds.append(prompt_embeds)
+            input_im_masks.append(prompt_im_masks)
             # NOTE(woosuk): Here we assume that the first token in the prompt
             # is always the first token in the sequence.
             input_positions.append(
@@ -245,21 +252,19 @@ class ModelRunner:
 
         max_prompt_len = max(subquery_lens)
         assert max_prompt_len > 0
-        input_tokens = _make_tensor_with_pad(input_tokens,
-                                             max_prompt_len,
-                                             pad=0,
-                                             dtype=torch.long,
-                                             device=self.device)
-        input_positions = _make_tensor_with_pad(input_positions,
-                                                max_prompt_len,
-                                                pad=0,
-                                                dtype=torch.long,
-                                                device=self.device)
-        slot_mapping = _make_tensor_with_pad(slot_mapping,
-                                             max_prompt_len,
-                                             pad=_PAD_SLOT_ID,
-                                             dtype=torch.long,
-                                             device=self.device)
+        input_tokens: torch.Tensor = _make_tensor_with_pad(
+            input_tokens, max_prompt_len, pad=0, dtype=torch.long, device=self.device)
+        input_embeds: Optional[torch.Tensor] = torch.stack([
+            torch.nn.functional.pad(embed, (0, 0, 0, max_prompt_len - embed.size(0)))
+            for embed in input_embeds
+        ], dim=0).to(self.device) if input_embeds[0] is not None else None
+        input_im_masks: Optional[torch.Tensor] = _make_tensor_with_pad(
+            input_im_masks, max_prompt_len, pad=0, dtype=torch.long, device=self.device
+        ) if input_im_masks[0] is not None else None
+        input_positions: torch.Tensor = _make_tensor_with_pad(
+            input_positions, max_prompt_len, pad=0, dtype=torch.long, device=self.device)
+        slot_mapping: torch.Tensor = _make_tensor_with_pad(
+            slot_mapping, max_prompt_len, pad=_PAD_SLOT_ID, dtype=torch.long, device=self.device)
         lora_index_mapping = [
             _pad_to_max(mapping, max_prompt_len, pad=0)
             for mapping in lora_index_mapping
@@ -297,7 +302,8 @@ class ModelRunner:
             use_cuda_graph=False,
             kv_cache_dtype=self.kv_cache_dtype,
         )
-        return (input_tokens, input_positions, input_metadata, prompt_lens,
+        return (input_tokens, input_embeds, input_im_masks,
+                input_positions, input_metadata, prompt_lens,
                 subquery_lens, lora_index_mapping, lora_prompt_mapping,
                 lora_requests)
 
@@ -517,7 +523,8 @@ class ModelRunner:
     def prepare_input_tensors(
         self,
         seq_group_metadata_list: Optional[List[SequenceGroupMetadata]],
-    ) -> Tuple[torch.Tensor, torch.Tensor, InputMetadata, SamplingMetadata,
+    ) -> Tuple[torch.Tensor, Optional[torch.Tensor], Optional[torch.Tensor],
+               torch.Tensor, InputMetadata, SamplingMetadata,
                Set[int], LoRAMapping]:
         if self.is_driver_worker:
             # NOTE: We assume that all sequences in the group are all prompts or
@@ -525,13 +532,15 @@ class ModelRunner:
             is_prompt = seq_group_metadata_list[0].is_prompt
             # Prepare input tensors.
             if is_prompt:
-                (input_tokens, input_positions, input_metadata, prompt_lens,
+                (input_tokens, input_embeds, input_im_masks,
+                 input_positions, input_metadata, prompt_lens,
                  subquery_lens, lora_index_mapping, lora_prompt_mapping,
                  lora_requests) = self._prepare_prompt(seq_group_metadata_list)
             else:
                 (input_tokens, input_positions, input_metadata,
                  lora_index_mapping, lora_prompt_mapping,
                  lora_requests) = self._prepare_decode(seq_group_metadata_list)
+                input_embeds = input_im_masks = None
                 prompt_lens = []
                 subquery_lens = None
             sampling_metadata = self._prepare_sample(seq_group_metadata_list,
@@ -552,6 +561,8 @@ class ModelRunner:
             # Broadcast the metadata.
             metadata_dict = {
                 "input_tokens": input_tokens,
+                "input_embeds": input_embeds,
+                "input_im_masks": input_im_masks,
                 "input_positions": input_positions,
                 "is_prompt": input_metadata.is_prompt,
                 "slot_mapping": input_metadata.slot_mapping,
@@ -572,6 +583,8 @@ class ModelRunner:
         else:
             metadata_dict = broadcast_tensor_dict(src=0)
             input_tokens = metadata_dict["input_tokens"]
+            input_embeds = metadata_dict["input_embeds"]
+            input_im_masks = metadata_dict["input_im_masks"]
             input_positions = metadata_dict["input_positions"]
             lora_mapping = metadata_dict["lora_mapping"]
             lora_requests = metadata_dict["lora_requests"]
@@ -597,7 +610,7 @@ class ModelRunner:
                 perform_sampling=False,
             )
 
-        return (input_tokens, input_positions, input_metadata,
+        return (input_tokens, input_embeds, input_im_masks, input_positions, input_metadata,
                 sampling_metadata, lora_requests, lora_mapping)
 
     @torch.inference_mode()
@@ -622,7 +635,9 @@ class ModelRunner:
             
         if BENCHMARK_RUNNER: start_prepare.record()
         (
-            input_tokens, 
+            input_tokens,
+            input_embeds,
+            input_im_masks,
             input_positions, 
             input_metadata, 
             sampling_metadata, 
@@ -669,12 +684,18 @@ class ModelRunner:
                     runner.graph_precomputed_mask.need_offload_prefetch = True
                 else:
                     raise Exception()
-        
+
+        kwargs = {}
+        if input_embeds is not None:
+            kwargs['input_embeds'] = input_embeds
+        if input_im_masks is not None:
+            kwargs['input_im_masks'] = input_im_masks
         hidden_states = model_executable(
             input_ids=input_tokens,
             positions=input_positions,
             kv_caches=kv_caches,
             input_metadata=input_metadata,
+            **kwargs,
         )
         
         for k_cache, v_cache in kv_caches:
