@@ -802,4 +802,6 @@ class LLMEngine:
         self.model_executor.check_health()
 
     def _init_image_encoder(self):
-        self.image_encoder = ImageEncoder()
+        import torch
+        # FIXME: Use last device for image encoder for now
+        self.image_encoder = ImageEncoder(f"cuda:{torch.cuda.device_count() - 1}")

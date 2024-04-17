@@ -12,13 +12,14 @@ from transformers import CLIPVisionModel
 
 
 class ImageEncoder:
-    def __init__(self):
-        self.plora_glb_GN = torch.zeros([1, 1, 4096])
-        self.plora_sub_GN = torch.zeros([1, 1, 1, 4096])
+    def __init__(self, device='cpu'):
+        self.plora_glb_GN = torch.zeros([1, 1, 4096], device=device)
+        self.plora_sub_GN = torch.zeros([1, 1, 1, 4096], device=device)
 
-        self.vit = build_vision_tower()
-        self.vision_proj = build_vision_projector()
-        self.tok_embeddings = torch.nn.Embedding(92544, 4096)
+        self.vit = build_vision_tower().to(device)
+        self.vision_proj = build_vision_projector().to(device)
+        self.tok_embeddings = torch.nn.Embedding(92544, 4096, device=device)
+        self.device = device
 
         states = torch.load('vit_weights.pth', map_location='cpu')
         self.vit.load_state_dict(states['vit'])
@@ -34,14 +35,14 @@ class ImageEncoder:
         ])
 
     def embed_tokens(self, tokens: List[int]):
-        return self.tok_embeddings(torch.tensor(tokens))
+        return self.tok_embeddings(torch.tensor(tokens, device=self.device))
 
     def encode_one_image(self, image: PIL.Image, hd_num=25):
         """Encode one image into a tensor."""
         if image is None:
             return None
         image = HD_transform(image, hd_num=hd_num)
-        image = self.vis_processor(image).unsqueeze(0)
+        image = self.vis_processor(image).unsqueeze(0).to(self.device)
 
         img_embeds = self.img2emb(image)
         return img_embeds.squeeze(0)
