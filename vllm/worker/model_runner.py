@@ -619,7 +619,10 @@ class ModelRunner:
             
             start_sample = torch.cuda.Event(enable_timing=True)
             end_sample = torch.cuda.Event(enable_timing=True)
-            
+        
+        if BENCHMARK_RUNNER:
+            torch.cuda.synchronize()
+        
         if BENCHMARK_RUNNER: start_prepare.record()
         (
             input_tokens, 
@@ -629,10 +632,14 @@ class ModelRunner:
             lora_requests,
             lora_mapping
         ) = self.prepare_input_tensors(seq_group_metadata_list)
-        if BENCHMARK_RUNNER: end_prepare.record()
-
+        
         if self.lora_config:
             self.set_active_loras(lora_requests, lora_mapping)
+        
+        if BENCHMARK_RUNNER: end_prepare.record()
+        
+        if BENCHMARK_RUNNER:
+            torch.cuda.synchronize()
 
         if BENCHMARK_RUNNER: start_model.record()
         # Execute the model.
