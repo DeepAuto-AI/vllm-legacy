@@ -620,8 +620,8 @@ class ModelRunner:
             start_sample = torch.cuda.Event(enable_timing=True)
             end_sample = torch.cuda.Event(enable_timing=True)
         
-        if BENCHMARK_RUNNER:
-            torch.cuda.synchronize()
+        # if BENCHMARK_RUNNER:
+        #     torch.cuda.synchronize()
         
         if BENCHMARK_RUNNER: start_prepare.record()
         (
@@ -638,8 +638,8 @@ class ModelRunner:
         
         if BENCHMARK_RUNNER: end_prepare.record()
         
-        if BENCHMARK_RUNNER:
-            torch.cuda.synchronize()
+        # if BENCHMARK_RUNNER:
+        #     torch.cuda.synchronize()
 
         if BENCHMARK_RUNNER: start_model.record()
         # Execute the model.
@@ -693,8 +693,8 @@ class ModelRunner:
         
         if BENCHMARK_RUNNER: end_model.record()
         
-        if BENCHMARK_RUNNER:
-            torch.cuda.synchronize()
+        # if BENCHMARK_RUNNER:
+        #     torch.cuda.synchronize()
 
         # Sample the next token.
         if BENCHMARK_RUNNER: start_sample.record()
