@@ -685,6 +685,9 @@ class ModelRunner:
                     v_cache.decode_end()
         
         if BENCHMARK_RUNNER: end_model.record()
+        
+        if BENCHMARK_RUNNER:
+            torch.cuda.synchronize()
 
         # Sample the next token.
         if BENCHMARK_RUNNER: start_sample.record()
