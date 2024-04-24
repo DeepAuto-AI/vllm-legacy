@@ -1,3 +1,4 @@
+import os
 import time
 from typing import Dict, Iterable, List, Optional, Tuple, Type, Union
 
@@ -97,7 +98,9 @@ class LLMEngine:
         self._verify_args()
 
         self._init_tokenizer()
-        self._init_image_encoder()
+        vit_weights_path = os.environ.get('VIT_WEIGHTS_PATH', None)
+        if vit_weights_path is not None:
+            self._init_image_encoder(vit_weights_path)
         self.seq_counter = Counter()
         logger.info('tokenizer initialized')
 
@@ -801,7 +804,7 @@ class LLMEngine:
     def check_health(self) -> None:
         self.model_executor.check_health()
 
-    def _init_image_encoder(self):
+    def _init_image_encoder(self, vit_weights_path):
         import torch
         # FIXME: Use last device for image encoder for now
-        self.image_encoder = ImageEncoder(f"cuda:{torch.cuda.device_count() - 1}")
+        self.image_encoder = ImageEncoder(vit_weights_path, device=f"cuda:{torch.cuda.device_count() - 1}")

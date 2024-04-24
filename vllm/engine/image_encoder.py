@@ -1,4 +1,5 @@
 import math
+import os
 import re
 from typing import List
 
@@ -7,23 +8,64 @@ import numpy as np
 import torch
 import torchvision.transforms as transforms
 from PIL import Image
+from peft import LoraConfig, TaskType, get_peft_model
 from torchvision.transforms.functional import InterpolationMode
 from transformers import CLIPVisionModel
 
 
+class Projector(torch.nn.Module):
+    def __init__(self):
+        super().__init__()
+        self.vision_proj = build_vision_projector()
+
+    def forward(self, x):
+        return self.vision_proj(x)
+
+
 class ImageEncoder:
-    def __init__(self, device='cpu'):
+    def __init__(self, weights_path=None, device='cpu'):
         self.plora_glb_GN = torch.zeros([1, 1, 4096], device=device)
         self.plora_sub_GN = torch.zeros([1, 1, 1, 4096], device=device)
 
+        states = torch.load(weights_path, map_location='cpu')
+
+        if any('lora_A' in key for key in states['vit'].keys()):
+            lora_r = 512
+            peft_config = LoraConfig(
+                inference_mode=True,
+                r=lora_r,
+                lora_alpha=lora_r // 2,
+                lora_dropout=0.05,
+                target_modules=[
+                    'attention.q_proj.linear',
+                    'attention.k_proj.linear',
+                    'attention.v_proj.linear',
+                    'attention.wo.linear',
+                    'feed_forward.w1.linear',
+                    'feed_forward.w2.linear',
+                    'feed_forward.w3.linear',
+                    'vision_proj.0', 'vision_proj.2',
+                    'self_attn.q_proj', 'self_attn.k_proj', 'self_attn.v_proj',
+                    'out_proj', 'mlp.fc1', 'mlp.fc2'
+                ],
+                modules_to_save=[
+                    'tree_avgpool_scaler',
+                    'input_layernorm', 'post_attention_layernorm'
+                ]
+            )
+        else:
+            peft_config = None
+
         self.vit = build_vision_tower().to(device)
-        self.vision_proj = build_vision_projector().to(device)
+        self.vision_proj = Projector().to(device)
+        if peft_config is not None:
+            self.vit = get_peft_model(self.vit, peft_config)
+            self.vision_proj = get_peft_model(self.vision_proj, peft_config)
         self.tok_embeddings = torch.nn.Embedding(92544, 4096, device=device)
         self.device = device
 
-        states = torch.load('vit_weights.pth', map_location='cpu')
-        self.vit.load_state_dict(states['vit'])
-        self.vision_proj.load_state_dict(states['vision_proj'])
+        self.vit.base_model.model.load_state_dict(states['vit'])
+        self.vision_proj.base_model.model.vision_proj.load_state_dict(states['vision_proj'])
         self.plora_sub_GN.copy_(states['plora_sub_GN'])
         self.plora_glb_GN.copy_(states['plora_glb_GN'])
         self.tok_embeddings.load_state_dict(states['tok_embeddings'])
