@@ -307,7 +307,7 @@ class InternLM2ForCausalLM(nn.Module):
                 if name.endswith(".bias") and name not in params_dict:
                     continue
                 param = params_dict[name]
-                if "wqkv" in name:
+                if "wqkv.weight" in name:
                     config = self.config
                     kv_groups = (config.num_attention_heads //
                                  config.num_key_value_heads)

@@ -233,6 +233,14 @@ class _AsyncLLMEngine(LLMEngine):
             assert prompt is not None
             if images is None:
                 images = []
+
+            if len(images) == 0:
+                prompt_token_ids = await self.tokenizer.encode_async(
+                    request_id=request_id,
+                    prompt=prompt,
+                    lora_request=lora_request)
+                return prompt_token_ids, None, None
+
             assert len(images) == prompt.count("[[IMAGE_GOES_HERE]]"), "Number of images should match number of [[IMAGE_GOES_HERE]] in prompt."
 
             prompt_token_ids = []

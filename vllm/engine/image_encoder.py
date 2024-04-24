@@ -37,7 +37,7 @@ class ImageEncoder:
     def embed_tokens(self, tokens: List[int]):
         return self.tok_embeddings(torch.tensor(tokens, device=self.device))
 
-    def encode_one_image(self, image: PIL.Image, hd_num=25):
+    def encode_one_image(self, image: PIL.Image, hd_num=25):  # 55 for 4KHD
         """Encode one image into a tensor."""
         if image is None:
             return None
