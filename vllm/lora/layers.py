@@ -721,7 +721,7 @@ class RowParallelLinearWithLoRA(BaseLayerWithLoRA):
         self.reset_lora(index)
         if self.base_layer.tp_size > 1:
             tensor_model_parallel_rank = get_tensor_model_parallel_rank()
-            shard_size = self.base_layer.weight.shape[1]
+            shard_size = self.base_layer.input_size_per_partition
             start_idx = tensor_model_parallel_rank * shard_size
             end_idx = (tensor_model_parallel_rank + 1) * shard_size
             lora_a = lora_a[start_idx:end_idx, :]
