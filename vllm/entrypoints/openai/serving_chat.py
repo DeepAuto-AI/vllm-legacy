@@ -51,21 +51,23 @@ class OpenAIServingChat(OpenAIServing):
         NOTE: Currently we do not support the following feature:
             - function_call (Users should implement this by themselves)
         """
+        #request.model = self.served_model
         error_check_ret = await self._check_model(request)
         if error_check_ret is not None:
             return error_check_ret
 
         try:
-            prompt = make_prompt(request, self.tokenizer)
+            prompt, images = make_prompt(request, self.tokenizer)
         except Exception as e:
             logger.error(
                 f"Error in applying chat template from request: {str(e)}")
             return self.create_error_response(str(e))
 
         request_id = f"cmpl-{random_uuid()}"
+        token_ids = None
         try:
-            token_ids = self._validate_prompt_and_tokenize(request,
-                                                           prompt=prompt)
+            #token_ids = self._validate_prompt_and_tokenize(request,
+            #                                               prompt=prompt)
             sampling_params = request.to_sampling_params()
             lora_request = self._maybe_get_lora(request)
             guided_decode_logits_processor = (
@@ -80,7 +82,7 @@ class OpenAIServingChat(OpenAIServing):
             return self.create_error_response(str(e))
 
         result_generator = self.engine.generate(prompt, sampling_params,
-                                                request_id, token_ids,
+                                                request_id, images, token_ids,
                                                 lora_request)
         # Streaming response
         if request.stream:
