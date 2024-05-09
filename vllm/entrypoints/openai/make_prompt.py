@@ -6,7 +6,6 @@ from transformers import PreTrainedTokenizer
 from base64 import b64decode
 
 from .protocol import ChatCompletionRequest
-from .pdf_reader import read_doc
 
 
 DEFAULT_SYSTEM_PROMPT = """You are a helpful, respectful and honest assistant. Always answer as helpfully as possible, while being safe. Your answers should not include any harmful, unethical, racist, sexist, toxic, dangerous, or illegal content. Please ensure that your responses are socially unbiased and positive in nature.
@@ -47,14 +46,6 @@ def make_prompt(request: ChatCompletionRequest,
                     images.append(image)
                     return "[[IMAGE_GOES_HERE]]"
                 return display_text
-            elif mime_type == "application/pdf":
-                texts = read_doc(file, mime_type)
-                result = (
-                    f"[Begin document]" +
-                    "\n".join([f"(Page {t.page}) {t.text}" for t in texts]) +
-                    f"[End document]"
-                )
-                return result
             else:
                 raise ValueError(f"Unsupported mime type: {mime_type}")
 
