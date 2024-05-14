@@ -243,7 +243,7 @@ class RayGPUExecutor(ExecutorBase):
         # Since we use a shared centralized controller, we take the minimum
         # number of blocks across all workers to make sure all the memory
         # operators can be applied to all workers.
-        num_gpu_blocks = min(b[0] for b in num_blocks) + 16 # NOTE: heejun hotfix.
+        num_gpu_blocks = min(b[0] for b in num_blocks) + 16 # NOTE: neko hotfix.
         num_cpu_blocks = min(b[1] for b in num_blocks)
         logger.info(f"# GPU blocks: {num_gpu_blocks}, "
                     f"# CPU blocks: {num_cpu_blocks}")
