@@ -215,7 +215,7 @@ class ManagedTensor:
         # print('asdfsadfsafd', flush=True)
         # torch.cuda.current_stream(self.target_device).wait_stream(self.stream)
         
-        print(f'prefetch: commited: {commited}, calls: {prefetch_calls}, took: {(time.time() - t) * 1000:.3f}, elapsed_scan: {elapsed_scan:.3f}, elapsed_call: {elapsed_call:.3f}')
+        print(f'prefetch: commited: {commited:,}, calls: {prefetch_calls}, took: {(time.time() - t) * 1000:.3f}, elapsed_scan: {elapsed_scan:.3f}, elapsed_call: {elapsed_call:.3f}')
 
     def prompt_start(self, block_indices):
         # return # disable prefetch

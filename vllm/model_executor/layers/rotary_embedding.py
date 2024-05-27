@@ -92,7 +92,7 @@ class RotaryEmbedding(nn.Module):
         cos = freqs.cos()
         sin = freqs.sin()
         cache = torch.cat((cos, sin), dim=-1)
-        warnings.warn('ainl: i am monkey, i need fp8 for rope. should work? idk')
+        warnings.warn('neko: i am monkey, i need fp8 for rope. should work? idk')
         return cache#.to(torch.float8_e5m2)
 
     def get_cos_sin_cache(self) -> Tuple[torch.Tensor, torch.Tensor]:

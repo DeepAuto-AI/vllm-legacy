@@ -95,6 +95,7 @@ class GPUExecutor(ExecutorBase):
                 cpu_swap_space=self.cache_config.swap_space_bytes,
                 cache_dtype=self.cache_config.cache_dtype,
             ))
+        num_gpu_blocks += 1 # NOTE hot fix?
 
         logger.info(f"# GPU blocks: {num_gpu_blocks}, "
                     f"# CPU blocks: {num_cpu_blocks}")

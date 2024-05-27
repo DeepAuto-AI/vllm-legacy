@@ -47,10 +47,11 @@ def get_config(model: str,
             raise RuntimeError(err_msg) from e
         else:
             raise e
+    
     if config.model_type in _CONFIG_REGISTRY:
         config_class = _CONFIG_REGISTRY[config.model_type]
         config = config_class.from_pretrained(model, revision=revision, code_revision=code_revision)
-
+    
     if 'timber' in [os.getenv('PAGED_ATTENTION_BACKEND', 'timber'), os.getenv('PROMPT_ATTENTION_BACKEND', 'timber')] and hasattr(config, 'sliding_window'):
         logger.info(f'sliding window ({config.sliding_window}) disabled -> {config.max_position_embeddings}')
         config.sliding_window = config.max_position_embeddings
