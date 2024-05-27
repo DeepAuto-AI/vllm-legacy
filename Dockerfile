@@ -79,8 +79,8 @@ RUN pip --verbose wheel flash-attn==${FLASH_ATTN_VERSION} \
 FROM dev AS test
 
 # copy pytorch extensions separately to avoid having to rebuild
-# when python code changes
 WORKDIR /vllm-workspace
+# when python code changes
 # ADD is used to preserve directory structure
 ADD . /vllm-workspace/
 COPY --from=build /workspace/vllm/*.so /vllm-workspace/vllm/
@@ -121,6 +121,13 @@ FROM vllm-base AS vllm-openai
 # install additional dependencies for openai api server
 RUN --mount=type=cache,target=/root/.cache/pip \
     pip install accelerate hf_transfer
+
+# install timber
+RUN mkdir /workspace/timber
+COPY --from=timber timber /workspace/timber/timber
+COPY --from=timber setup.py /workspace/timber/setup.py
+RUN pip install -e /workspace/timber \
+    && pip install numba
 
 COPY --from=build /workspace/vllm/*.so /workspace/vllm/
 COPY vllm vllm

@@ -3,6 +3,7 @@ import math
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, List, Optional, Tuple
 
+import einops
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -57,7 +58,13 @@ def _apply_lora(
     x = x.view(-1, x.shape[-1])
     output = output.view(-1, output.shape[-1])
     indices = indices.view(-1)
-    add_lora(output, x, lora_a_stacked, lora_b_stacked, indices, 0, 1.0)
+    lora_rank = lora_a_stacked.shape[-2]
+    if lora_rank >= 128:
+        # FIXME: This is a workaround for punica not supporting rank >= 128
+        output.add_(einops.einsum(x, lora_a_stacked[0, 0], lora_b_stacked[0, 0],
+                                  "b h, r h, o r -> b o"))
+    else:
+        add_lora(output, x, lora_a_stacked, lora_b_stacked, indices, 0, 1.0)
     return output.view_as(org_output)
 
 
@@ -281,6 +288,15 @@ class VocabParallelEmbeddingWithLoRA(BaseLayerWithLoRA):
         return full_output.view_as(full_output_org)
 
 
+def get_device(layer):
+    if hasattr(layer, "weight"):
+        return layer.weight.device
+    elif hasattr(layer, "qweight"):
+        return layer.qweight.device
+    else:
+        raise ValueError("Unknown layer type")
+
+
 class ColumnParallelLinearWithLoRA(BaseLayerWithLoRA):
 
     def __init__(self, base_layer: ColumnParallelLinear) -> None:
@@ -296,17 +312,17 @@ class ColumnParallelLinearWithLoRA(BaseLayerWithLoRA):
             max_loras,
             1,
             lora_config.max_lora_rank,
-            self.base_layer.weight.shape[1],
+            self.base_layer.input_size,
             dtype=lora_config.lora_dtype,
-            device=self.base_layer.weight.device,
+            device=get_device(self.base_layer),
         )
         self.lora_b_stacked = torch.zeros(
             max_loras,
             1,
-            self.base_layer.weight.shape[0],
+            self.base_layer.output_size_per_partition,
             lora_config.max_lora_rank,
             dtype=lora_config.lora_dtype,
-            device=self.base_layer.weight.device,
+            device=get_device(self.base_layer),
         )
 
         self.indices: Optional[torch.Tensor] = None
@@ -417,18 +433,18 @@ class MergedColumnParallelLinearWithLoRA(ColumnParallelLinearWithLoRA):
                 max_loras,
                 1,
                 lora_config.max_lora_rank,
-                self.base_layer.weight.shape[1],
+                self.base_layer.input_size,
                 dtype=lora_config.lora_dtype,
-                device=self.base_layer.weight.device,
+                device=get_device(self.base_layer),
             ) for _ in range(n_slices))
         self.lora_b_stacked = tuple(
             torch.zeros(
                 max_loras,
                 1,
-                self.base_layer.weight.shape[0] // 2,
+                self.base_layer.output_size_per_partition // 2,
                 lora_config.max_lora_rank,
                 dtype=lora_config.lora_dtype,
-                device=self.base_layer.weight.device,
+                device=get_device(self.base_layer),
             ) for _ in range(n_slices))
 
         self.indices: Optional[torch.Tensor] = None
@@ -522,25 +538,25 @@ class QKVParallelLinearWithLora(ColumnParallelLinearWithLoRA):
                 max_loras,
                 1,
                 lora_config.max_lora_rank,
-                self.base_layer.weight.shape[1],
+                self.base_layer.input_size,
                 dtype=lora_config.lora_dtype,
-                device=self.base_layer.weight.device,
+                device=get_device(self.base_layer),
             ),
             torch.zeros(
                 max_loras,
                 1,
                 lora_config.max_lora_rank,
-                self.base_layer.weight.shape[1],
+                self.base_layer.input_size,
                 dtype=lora_config.lora_dtype,
-                device=self.base_layer.weight.device,
+                device=get_device(self.base_layer),
             ),
             torch.zeros(
                 max_loras,
                 1,
                 lora_config.max_lora_rank,
-                self.base_layer.weight.shape[1],
+                self.base_layer.input_size,
                 dtype=lora_config.lora_dtype,
-                device=self.base_layer.weight.device,
+                device=get_device(self.base_layer),
             ),
         )
         self.lora_b_stacked = (
@@ -550,7 +566,7 @@ class QKVParallelLinearWithLora(ColumnParallelLinearWithLoRA):
                 self.q_proj_shard_size,
                 lora_config.max_lora_rank,
                 dtype=lora_config.lora_dtype,
-                device=self.base_layer.weight.device,
+                device=get_device(self.base_layer),
             ),
             torch.zeros(
                 max_loras,
@@ -558,7 +574,7 @@ class QKVParallelLinearWithLora(ColumnParallelLinearWithLoRA):
                 self.kv_proj_shard_size,
                 lora_config.max_lora_rank,
                 dtype=lora_config.lora_dtype,
-                device=self.base_layer.weight.device,
+                device=get_device(self.base_layer),
             ),
             torch.zeros(
                 max_loras,
@@ -566,7 +582,7 @@ class QKVParallelLinearWithLora(ColumnParallelLinearWithLoRA):
                 self.kv_proj_shard_size,
                 lora_config.max_lora_rank,
                 dtype=lora_config.lora_dtype,
-                device=self.base_layer.weight.device,
+                device=get_device(self.base_layer),
             ),
         )
 
@@ -673,20 +689,20 @@ class RowParallelLinearWithLoRA(BaseLayerWithLoRA):
                 max_loras,
                 1,
                 lora_config.max_lora_rank,
-                self.base_layer.weight.shape[1],
+                self.base_layer.input_size_per_partition,
             ),
             dtype=lora_config.lora_dtype,
-            device=self.base_layer.weight.device,
+            device=get_device(self.base_layer),
         )
         self.lora_b_stacked = torch.zeros(
             (
                 max_loras,
                 1,
-                self.base_layer.weight.shape[0],
+                self.base_layer.output_size,
                 lora_config.max_lora_rank,
             ),
             dtype=lora_config.lora_dtype,
-            device=self.base_layer.weight.device,
+            device=get_device(self.base_layer),
         )
         self.indices: Optional[torch.Tensor] = None
         self.indices_len: Optional[List[int]] = None
@@ -705,7 +721,7 @@ class RowParallelLinearWithLoRA(BaseLayerWithLoRA):
         self.reset_lora(index)
         if self.base_layer.tp_size > 1:
             tensor_model_parallel_rank = get_tensor_model_parallel_rank()
-            shard_size = self.base_layer.weight.shape[1]
+            shard_size = self.base_layer.input_size_per_partition
             start_idx = tensor_model_parallel_rank * shard_size
             end_idx = (tensor_model_parallel_rank + 1) * shard_size
             lora_a = lora_a[start_idx:end_idx, :]

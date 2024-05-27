@@ -1,9 +1,11 @@
+import os
 import time
 from typing import Dict, Iterable, List, Optional, Tuple, Type, Union
 
 from transformers import PreTrainedTokenizer
 
 import vllm
+from vllm.engine.image_encoder import ImageEncoder
 from vllm.lora.request import LoRARequest
 from vllm.config import (CacheConfig, DeviceConfig, ModelConfig,
                          ParallelConfig, SchedulerConfig, LoRAConfig)
@@ -96,6 +98,9 @@ class LLMEngine:
         self._verify_args()
 
         self._init_tokenizer()
+        vit_weights_path = os.environ.get('VIT_WEIGHTS_PATH', None)
+        if vit_weights_path is not None:
+            self._init_image_encoder(vit_weights_path)
         self.seq_counter = Counter()
         logger.info('tokenizer initialized')
 
@@ -192,6 +197,8 @@ class LLMEngine:
         prompt: Optional[str],
         sampling_params: SamplingParams,
         prompt_token_ids: Optional[List[int]] = None,
+        prompt_embeds: Optional["torch.Tensor"] = None,
+        prompt_im_masks: Optional[List[int]] = None,
         arrival_time: Optional[float] = None,
         lora_request: Optional[LoRARequest] = None,
     ) -> None:
@@ -259,7 +266,8 @@ class LLMEngine:
         eos_token_id = self.tokenizer.get_lora_tokenizer(
             lora_request).eos_token_id
         seq = Sequence(seq_id, prompt, prompt_token_ids, block_size,
-                       eos_token_id, lora_request)
+                       eos_token_id, lora_request,
+                       prompt_embeds, prompt_im_masks)
 
         # Defensive copy of SamplingParams, which are used by the sampler,
         # this doesn't deep-copy LogitsProcessor objects
@@ -795,3 +803,8 @@ class LLMEngine:
 
     def check_health(self) -> None:
         self.model_executor.check_health()
+
+    def _init_image_encoder(self, vit_weights_path):
+        import torch
+        # FIXME: Use last device for image encoder for now
+        self.image_encoder = ImageEncoder(vit_weights_path, device=f"cuda:{torch.cuda.device_count() - 1}")

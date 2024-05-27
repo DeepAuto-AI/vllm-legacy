@@ -5,8 +5,10 @@ from functools import partial
 from typing import (Callable, Dict, Iterable, List, Optional, Set, Tuple, Type,
                     Union, AsyncIterator)
 
+import torch
 from transformers import PreTrainedTokenizer
 
+import PIL.Image
 from vllm.lora.request import LoRARequest
 from vllm.config import ModelConfig
 from vllm.engine.arg_utils import AsyncEngineArgs
@@ -221,16 +223,54 @@ class _AsyncLLMEngine(LLMEngine):
         self,
         request_id: str,  # pylint: disable=unused-argument
         prompt: Optional[str],
+        images: Optional[List[PIL.Image.Image]] = None,
         prompt_token_ids: Optional[List[int]] = None,
+        prompt_embeds: Optional[torch.Tensor] = None,
+        prompt_im_masks: Optional[List[int]] = None,
         lora_request: Optional[LoRARequest] = None,
     ):
         if prompt_token_ids is None:
             assert prompt is not None
-            prompt_token_ids = await self.tokenizer.encode_async(
-                request_id=request_id,
-                prompt=prompt,
-                lora_request=lora_request)
-        return prompt_token_ids
+            if images is None:
+                images = []
+
+            if len(images) == 0:
+                prompt_token_ids = await self.tokenizer.encode_async(
+                    request_id=request_id,
+                    prompt=prompt,
+                    lora_request=lora_request)
+                return prompt_token_ids, None, None
+
+            assert len(images) == prompt.count("[[IMAGE_GOES_HERE]]"), "Number of images should match number of [[IMAGE_GOES_HERE]] in prompt."
+
+            prompt_token_ids = []
+            prompt_embeds = []
+            prompt_im_masks = []
+
+            is_first = True
+            for text_segment, image in zip(prompt.split('[[IMAGE_GOES_HERE]]'), images + [None]):
+                segment_token_ids = await self.tokenizer.encode_async(
+                    request_id=request_id,
+                    prompt=text_segment,
+                    lora_request=lora_request)
+                if not is_first:
+                    segment_token_ids = segment_token_ids[1:]  # Skip BOS token
+                prompt_token_ids.extend(segment_token_ids)
+                token_embeds = self.image_encoder.embed_tokens(segment_token_ids)
+                prompt_embeds.append(token_embeds)
+                prompt_im_masks.extend([1] * len(segment_token_ids))
+
+                if image is not None:
+                    img_embeds = self.image_encoder.encode_one_image(image)
+                    prompt_token_ids.extend([0] * img_embeds.shape[-2])
+                    prompt_embeds.append(img_embeds)
+                    prompt_im_masks.extend([0] * img_embeds.shape[-2])
+
+                is_first = False
+
+            prompt_embeds = torch.cat(prompt_embeds, dim=0)
+
+        return prompt_token_ids, prompt_embeds, prompt_im_masks
 
     async def add_request_async(
         self,
@@ -238,6 +278,8 @@ class _AsyncLLMEngine(LLMEngine):
         prompt: Optional[str],
         sampling_params: SamplingParams,
         prompt_token_ids: Optional[List[int]] = None,
+        prompt_embeds: Optional[torch.Tensor] = None,
+        prompt_im_masks: Optional[List[int]] = None,
         arrival_time: Optional[float] = None,
         lora_request: Optional[LoRARequest] = None,
     ) -> None:
@@ -246,16 +288,21 @@ class _AsyncLLMEngine(LLMEngine):
                              "not enabled!")
         if arrival_time is None:
             arrival_time = time.time()
-        prompt_token_ids = await self.encode_request_async(
+        (prompt_token_ids, prompt_embeds, prompt_im_masks
+         ) = await self.encode_request_async(
             request_id=request_id,
             prompt=prompt,
             prompt_token_ids=prompt_token_ids,
+            prompt_embeds=prompt_embeds,
+            prompt_im_masks=prompt_im_masks,
             lora_request=lora_request)
 
         return self.add_request(
             request_id,
             prompt=prompt,
             prompt_token_ids=prompt_token_ids,
+            prompt_embeds=prompt_embeds,
+            prompt_im_masks=prompt_im_masks,
             sampling_params=sampling_params,
             arrival_time=arrival_time,
             lora_request=lora_request,
@@ -478,6 +525,7 @@ class AsyncLLMEngine:
         request_id: str,
         prompt: Optional[str],
         sampling_params: SamplingParams,
+        images: Optional[List[PIL.Image.Image]] = None,
         prompt_token_ids: Optional[List[int]] = None,
         arrival_time: Optional[float] = None,
         lora_request: Optional[LoRARequest] = None,
@@ -511,15 +559,19 @@ class AsyncLLMEngine:
             arrival_time = time.time()
 
         if self.engine_use_ray:
-            prompt_token_ids = await self.engine.encode_request_async.remote(
+            (prompt_token_ids, prompt_embeds, prompt_im_masks
+             ) = await self.engine.encode_request_async.remote(
                 request_id=request_id,
                 prompt=prompt,
+                images=images,
                 prompt_token_ids=prompt_token_ids,
                 lora_request=lora_request)
         else:
-            prompt_token_ids = await self.engine.encode_request_async(
+            (prompt_token_ids, prompt_embeds, prompt_im_masks
+             ) = await self.engine.encode_request_async(
                 request_id=request_id,
                 prompt=prompt,
+                images=images,
                 prompt_token_ids=prompt_token_ids,
                 lora_request=lora_request)
 
@@ -528,6 +580,8 @@ class AsyncLLMEngine:
             prompt=prompt,
             sampling_params=sampling_params,
             prompt_token_ids=prompt_token_ids,
+            prompt_embeds=prompt_embeds,
+            prompt_im_masks=prompt_im_masks,
             arrival_time=arrival_time,
             lora_request=lora_request)
 
@@ -538,6 +592,7 @@ class AsyncLLMEngine:
         prompt: Optional[str],
         sampling_params: SamplingParams,
         request_id: str,
+        images: Optional[List[PIL.Image.Image]] = None,
         prompt_token_ids: Optional[List[int]] = None,
         lora_request: Optional[LoRARequest] = None,
     ) -> AsyncIterator[RequestOutput]:
@@ -612,6 +667,7 @@ class AsyncLLMEngine:
                 request_id,
                 prompt,
                 sampling_params,
+                images=images,
                 prompt_token_ids=prompt_token_ids,
                 arrival_time=arrival_time,
                 lora_request=lora_request,

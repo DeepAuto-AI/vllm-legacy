@@ -4,15 +4,16 @@ from typing import Any, Dict, List, Optional, Tuple
 import torch
 from torch import nn
 from transformers import PretrainedConfig
+from vllm.config import LoRAConfig
 
 from vllm.model_executor.input_metadata import InputMetadata
 from vllm.model_executor.layers.activation import SiluAndMul
 from vllm.model_executor.layers.attention import Attention
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.linear import (LinearMethodBase,
-                                               MergedColumnParallelLinear,
                                                QKVParallelLinear,
-                                               RowParallelLinear)
+                                               RowParallelLinear,
+                                               ColumnParallelLinear)
 from vllm.model_executor.layers.rotary_embedding import get_rope
 from vllm.model_executor.layers.sampler import Sampler
 from vllm.model_executor.layers.vocab_parallel_embedding import (
@@ -27,6 +28,32 @@ from vllm.sequence import SamplerOutput
 KVCache = Tuple[torch.Tensor, torch.Tensor]
 
 
+class PLoRA(nn.Module):
+    def __init__(self, in_features, out_features, linear_layer, lora_r, lora_alpha, lora_len):
+        super().__init__()
+        self.lora_r = lora_r
+        self.lora_alpha = lora_alpha
+        self.lora_len = lora_len
+        self.lora_scaling = self.lora_alpha / self.lora_r
+        self.linear = linear_layer
+        if isinstance(linear_layer, ColumnParallelLinear):
+            self.Plora_A = torch.nn.Linear(in_features, self.lora_r, bias=False)
+            self.Plora_B = ColumnParallelLinear(self.lora_r, out_features, bias=False)
+        else:
+            self.Plora_A = RowParallelLinear(in_features, self.lora_r, bias=False)
+            self.Plora_B = torch.nn.Linear(self.lora_r, out_features, bias=False)
+
+    def forward(self, x, im_mask=None):
+        res, bias = self.linear(x)
+        if im_mask is not None:
+            x = self.Plora_A(x)
+            x = x[0] if isinstance(x, tuple) else x
+            x = self.Plora_B(x)
+            x = x[0] if isinstance(x, tuple) else x
+            res = torch.where(im_mask[..., None], res, res + x * self.lora_scaling)
+        return res, bias
+
+
 class InternLM2MLP(nn.Module):
 
     def __init__(
@@ -37,23 +64,40 @@ class InternLM2MLP(nn.Module):
         linear_method: Optional[LinearMethodBase] = None,
     ) -> None:
         super().__init__()
-        self.gate_up_proj = MergedColumnParallelLinear(
-            hidden_size, [intermediate_size] * 2,
-            bias=False,
-            linear_method=linear_method)
-        self.w2 = RowParallelLinear(intermediate_size,
-                                    hidden_size,
-                                    bias=False,
-                                    linear_method=linear_method)
+        self.w1 = PLoRA(
+            hidden_size, intermediate_size,
+            ColumnParallelLinear(hidden_size,
+                                 intermediate_size,
+                                 bias=False,
+                                 linear_method=linear_method),
+            256, 256, 1225
+        )
+        self.w3 = PLoRA(
+            hidden_size, intermediate_size,
+            ColumnParallelLinear(hidden_size,
+                                 intermediate_size,
+                                 bias=False,
+                                 linear_method=linear_method),
+            256, 256, 1225
+        )
+        self.w2 = PLoRA(
+            intermediate_size, hidden_size,
+            RowParallelLinear(intermediate_size,
+                              hidden_size,
+                              bias=False,
+                              linear_method=linear_method),
+            256, 256, 1225
+        )
         if hidden_act != "silu":
             raise ValueError(f"Unsupported activation: {hidden_act}. "
                              "Only silu is supported for now.")
         self.act_fn = SiluAndMul()
 
-    def forward(self, x):
-        gate_up, _ = self.gate_up_proj(x)
-        x = self.act_fn(gate_up)
-        x, _ = self.w2(x)
+    def forward(self, x, im_mask=None):
+        gate_up_1, _ = self.w1(x, im_mask)
+        gate_up_3, _ = self.w3(x, im_mask)
+        x = self.act_fn(torch.cat([gate_up_1, gate_up_3], dim=-1))
+        x, _ = self.w2(x, im_mask)
         return x
 
 
@@ -93,19 +137,49 @@ class InternLM2Attention(nn.Module):
         self.rope_theta = rope_theta
         self.max_position_embeddings = max_position_embeddings
 
-        self.wqkv = QKVParallelLinear(
+        self.q_proj = PLoRA(
             hidden_size,
-            self.head_dim,
-            self.total_num_heads,
-            self.total_num_kv_heads,
-            bias=False,
-            linear_method=linear_method,
+            self.head_dim * self.total_num_heads,
+            ColumnParallelLinear(
+                hidden_size,
+                self.head_dim * self.total_num_heads,
+                bias=False,
+                linear_method=linear_method,
+            ),
+            8, 16, 0
         )
-        self.wo = RowParallelLinear(
+        self.k_proj = PLoRA(
+            hidden_size,
+            self.head_dim * self.total_num_kv_heads,
+            ColumnParallelLinear(
+                hidden_size,
+                self.head_dim * self.total_num_kv_heads,
+                bias=False,
+                linear_method=linear_method,
+            ),
+            8, 16, 0
+        )
+        self.v_proj = PLoRA(
+            hidden_size,
+            self.head_dim * self.total_num_kv_heads,
+            ColumnParallelLinear(
+                hidden_size,
+                self.head_dim * self.total_num_kv_heads,
+                bias=False,
+                linear_method=linear_method,
+            ),
+            8, 16, 0
+        )
+        self.wo = PLoRA(
             self.total_num_heads * self.head_dim,
             hidden_size,
-            bias=False,
-            linear_method=linear_method,
+            RowParallelLinear(
+                self.total_num_heads * self.head_dim,
+                hidden_size,
+                bias=False,
+                linear_method=linear_method,
+            ),
+            256, 256, 1225
         )
 
         self.rotary_emb = get_rope(
@@ -125,15 +199,17 @@ class InternLM2Attention(nn.Module):
         self,
         positions: torch.Tensor,
         hidden_states: torch.Tensor,
+        im_mask: Optional[torch.Tensor],
         kv_cache: KVCache,
         input_metadata: InputMetadata,
     ) -> torch.Tensor:
-        qkv, _ = self.wqkv(hidden_states)
-        q, k, v = qkv.split([self.q_size, self.kv_size, self.kv_size], dim=-1)
+        q, _ = self.q_proj(hidden_states, im_mask)
+        k, _ = self.k_proj(hidden_states, im_mask)
+        v, _ = self.v_proj(hidden_states, im_mask)
         q, k = self.rotary_emb(positions, q, k)
         k_cache, v_cache = kv_cache
         attn_output = self.attn(q, k, v, k_cache, v_cache, input_metadata)
-        output, _ = self.wo(attn_output)
+        output, _ = self.wo(attn_output, im_mask)
         return output
 
 
@@ -175,6 +251,7 @@ class InternLMDecoderLayer(nn.Module):
         self,
         positions: torch.Tensor,
         hidden_states: torch.Tensor,
+        im_mask: Optional[torch.Tensor],
         kv_cache: KVCache,
         input_metadata: InputMetadata,
         residual: Optional[torch.Tensor],
@@ -189,13 +266,14 @@ class InternLMDecoderLayer(nn.Module):
         hidden_states = self.attention(
             positions=positions,
             hidden_states=hidden_states,
+            im_mask=im_mask,
             kv_cache=kv_cache,
             input_metadata=input_metadata,
         )
 
         # Fully Connected
         hidden_states, residual = self.ffn_norm(hidden_states, residual)
-        hidden_states = self.feed_forward(hidden_states)
+        hidden_states = self.feed_forward(hidden_states, im_mask)
         return hidden_states, residual
 
 
@@ -205,11 +283,14 @@ class InternLM2Model(nn.Module):
         self,
         config: PretrainedConfig,
         linear_method: Optional[LinearMethodBase] = None,
+        lora_config: Optional[LoRAConfig] = None,
     ) -> None:
         super().__init__()
         self.config = config
         self.padding_idx = config.pad_token_id
-        self.vocab_size = config.vocab_size
+        lora_vocab = (lora_config.lora_extra_vocab_size *
+                      (lora_config.max_loras or 1)) if lora_config else 0
+        self.vocab_size = config.vocab_size + lora_vocab
         self.tok_embeddings = VocabParallelEmbedding(
             config.vocab_size,
             config.hidden_size,
@@ -223,17 +304,22 @@ class InternLM2Model(nn.Module):
     def forward(
         self,
         input_ids: torch.Tensor,
+        input_embeds: Optional[torch.Tensor],
+        input_im_masks: Optional[torch.Tensor],
         positions: torch.Tensor,
         kv_caches: List[KVCache],
         input_metadata: InputMetadata,
     ) -> torch.Tensor:
         hidden_states = self.tok_embeddings(input_ids)
+        if input_embeds is not None:
+            hidden_states = input_embeds.to(hidden_states.dtype)
         residual = None
         for i in range(len(self.layers)):
             layer = self.layers[i]
             hidden_states, residual = layer(
                 positions,
                 hidden_states,
+                input_im_masks,
                 kv_caches[i],
                 input_metadata,
                 residual,
@@ -244,17 +330,52 @@ class InternLM2Model(nn.Module):
 
 class InternLM2ForCausalLM(nn.Module):
 
+    packed_modules_mapping = {}
+
+    # LoRA specific attributes
+    supported_lora_modules = [
+        "q_proj.linear",
+        "k_proj.linear",
+        "v_proj.linear",
+        "wo.linear",
+        "feed_forward.w1.linear",
+        "feed_forward.w2.linear",
+        "feed_forward.w3.linear",
+        #"tok_embeddings",
+        #"output",
+    ]
+    embedding_modules = {
+        #"tok_embeddings": "input_embeddings",
+        #"output": "output_embeddings",
+    }
+    embedding_padding_modules = [
+        #"output"
+    ]
+
     def __init__(
         self,
         config: PretrainedConfig,
         linear_method: Optional[LinearMethodBase] = None,
+        lora_config: Optional[LoRAConfig] = None,
     ) -> None:
         super().__init__()
         self.config = config
         self.linear_method = linear_method
-        self.model = InternLM2Model(config, linear_method)
-        self.output = ParallelLMHead(config.vocab_size, config.hidden_size)
-        self.sampler = Sampler(config.vocab_size)
+        self.model = InternLM2Model(config, linear_method, lora_config=lora_config)
+        self.unpadded_vocab_size = config.vocab_size
+        if lora_config:
+            self.unpadded_vocab_size += lora_config.lora_extra_vocab_size
+        DEFAULT_VOCAB_PADDING_SIZE = 64
+        self.output = ParallelLMHead(
+            config.vocab_size,
+            config.hidden_size,
+            org_num_embeddings=config.vocab_size,
+            padding_size=DEFAULT_VOCAB_PADDING_SIZE
+            # We need bigger padding if using lora for kernel
+            # compatibility
+            if not lora_config else lora_config.lora_vocab_padding_size,
+        )
+        self.sampler = Sampler(self.unpadded_vocab_size, config.vocab_size)
 
     def forward(
         self,
@@ -262,8 +383,11 @@ class InternLM2ForCausalLM(nn.Module):
         positions: torch.Tensor,
         kv_caches: List[KVCache],
         input_metadata: InputMetadata,
+        input_embeds: Optional[torch.Tensor] = None,
+        input_im_masks: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
-        hidden_states = self.model(input_ids, positions, kv_caches,
+        input_im_masks = input_im_masks.bool() if input_im_masks is not None else None
+        hidden_states = self.model(input_ids, input_embeds, input_im_masks, positions, kv_caches,
                                    input_metadata)
         return hidden_states
 
@@ -283,48 +407,40 @@ class InternLM2ForCausalLM(nn.Module):
                      revision: Optional[str] = None):
         stacked_params_mapping = [
             # (param_name, shard_name, shard_id)
-            ("gate_up_proj", "w1", 0),
-            ("gate_up_proj", "w3", 1),
+            ("wqkv", "q_proj", "q"),
+            ("wqkv", "k_proj", "k"),
+            ("wqkv", "v_proj", "v"),
         ]
         params_dict = dict(self.named_parameters())
         for name, loaded_weight in hf_model_weights_iterator(
                 model_name_or_path, cache_dir, load_format, revision):
-            if "rotary_emb.inv_freq" in name:
+            if ("rotary_emb.inv_freq" in name
+                    or name.startswith('vit.')
+                    or name.startswith('vision_proj.')
+                    or name in ["plora_glb_GN", "plora_sub_GN"]
+                    or 'tree_avgpool_scaler' in name):
                 continue
-            for (param_name, weight_name, shard_id) in stacked_params_mapping:
-                if weight_name not in name:
-                    continue
-                name = name.replace(weight_name, param_name)
-                # Skip loading extra bias for GPTQ models.
-                if name.endswith(".bias") and name not in params_dict:
-                    continue
-                param = params_dict[name]
+            # Skip loading extra bias for GPTQ models.
+            if name.endswith(".bias") and name not in params_dict:
+                continue
+
+            if name.endswith(".weight") and name not in params_dict:
+                name = name.replace(".weight", ".linear.weight")
+
+            param = params_dict[name]
+            if "wqkv.linear.weight" in name:
+                config = self.config
+                kv_groups = config.num_attention_heads // config.num_key_value_heads
+                head_dim = config.hidden_size // config.num_attention_heads
+                loaded_weight = loaded_weight.view(-1, 2 + kv_groups, head_dim, loaded_weight.shape[-1])
+                wq, wk, wv = torch.split(loaded_weight, [kv_groups, 1, 1], dim=1)
+                wq = wq.reshape(-1, wq.shape[-1])
+                wk = wk.reshape(-1, wk.shape[-1])
+                wv = wv.reshape(-1, wv.shape[-1])
                 weight_loader = param.weight_loader
-                weight_loader(param, loaded_weight, shard_id)
-                break
+                weight_loader(param, wq, 'q')
+                weight_loader(param, wk, 'k')
+                weight_loader(param, wv, 'v')
             else:
-                # Skip loading extra bias for GPTQ models.
-                if name.endswith(".bias") and name not in params_dict:
-                    continue
-                param = params_dict[name]
-                if "wqkv.weight" in name:
-                    config = self.config
-                    kv_groups = (config.num_attention_heads //
-                                 config.num_key_value_heads)
-                    head_dim = config.hidden_size // config.num_attention_heads
-                    loaded_weight = loaded_weight.view(-1, 2 + kv_groups,
-                                                       head_dim,
-                                                       loaded_weight.shape[-1])
-                    wq, wk, wv = torch.split(loaded_weight, [kv_groups, 1, 1],
-                                             dim=1)
-                    wq = wq.reshape(-1, wq.shape[-1])
-                    wk = wk.reshape(-1, wk.shape[-1])
-                    wv = wv.reshape(-1, wv.shape[-1])
-                    weight_loader = param.weight_loader
-                    weight_loader(param, wq, 'q')
-                    weight_loader(param, wk, 'k')
-                    weight_loader(param, wv, 'v')
-                else:
-                    weight_loader = getattr(param, "weight_loader",
-                                            default_weight_loader)
-                    weight_loader(param, loaded_weight)
+                weight_loader = getattr(param, "weight_loader", default_weight_loader)
+                weight_loader(param, loaded_weight)

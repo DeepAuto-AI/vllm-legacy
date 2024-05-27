@@ -1,6 +1,10 @@
+import re
 import time
 import codecs
+from io import BytesIO
+
 from fastapi import Request
+
 from typing import AsyncGenerator, AsyncIterator, Optional, List, Union
 from vllm.logger import init_logger
 from vllm.utils import random_uuid
@@ -14,6 +18,8 @@ from vllm.outputs import RequestOutput
 from vllm.entrypoints.openai.serving_engine import OpenAIServing, LoRA
 from vllm.model_executor.guided_decoding import (
     get_guided_decoding_logits_processor)
+
+from .make_prompt import make_prompt
 
 logger = init_logger(__name__)
 
@@ -45,24 +51,23 @@ class OpenAIServingChat(OpenAIServing):
         NOTE: Currently we do not support the following feature:
             - function_call (Users should implement this by themselves)
         """
+        #request.model = self.served_model
         error_check_ret = await self._check_model(request)
         if error_check_ret is not None:
             return error_check_ret
 
         try:
-            prompt = self.tokenizer.apply_chat_template(
-                conversation=request.messages,
-                tokenize=False,
-                add_generation_prompt=request.add_generation_prompt)
+            prompt, images = make_prompt(request, self.tokenizer)
         except Exception as e:
             logger.error(
                 f"Error in applying chat template from request: {str(e)}")
             return self.create_error_response(str(e))
 
         request_id = f"cmpl-{random_uuid()}"
+        token_ids = None
         try:
-            token_ids = self._validate_prompt_and_tokenize(request,
-                                                           prompt=prompt)
+            #token_ids = self._validate_prompt_and_tokenize(request,
+            #                                               prompt=prompt)
             sampling_params = request.to_sampling_params()
             lora_request = self._maybe_get_lora(request)
             guided_decode_logits_processor = (
@@ -77,7 +82,7 @@ class OpenAIServingChat(OpenAIServing):
             return self.create_error_response(str(e))
 
         result_generator = self.engine.generate(prompt, sampling_params,
-                                                request_id, token_ids,
+                                                request_id, images, token_ids,
                                                 lora_request)
         # Streaming response
         if request.stream:

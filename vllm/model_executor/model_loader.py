@@ -22,6 +22,10 @@ def _set_default_torch_dtype(dtype: torch.dtype):
 
 def _get_model_architecture(model_config: ModelConfig) -> Type[nn.Module]:
     architectures = getattr(model_config.hf_config, "architectures", [])
+
+    if model_config.hf_config.model_type == 'internlmxcomposer2':  # FIXME(gpark): this is a hack
+        architectures = ['InternLMXComposer2']
+
     # Special handling for quantized Mixtral.
     # FIXME(woosuk): This is a temporary hack.
     if (model_config.quantization is not None
