@@ -8,7 +8,15 @@ import warnings
 import torch
 from vllm_flash_attn import flash_attn_varlen_func, flash_attn_with_kvcache
 from vllm._C import cache_ops
+from xformers import ops as xops
+from xformers.ops.fmha.attn_bias import (AttentionBias,
+                                         BlockDiagonalCausalMask,
+                                         LowerTriangularMaskWithTensorBias)
 
+from vllm.attention.backends.abstract import (AttentionBackend, AttentionImpl,
+                                              AttentionMetadata)
+from vllm.attention.ops.paged_attn import (PagedAttention,
+                                           PagedAttentionMetadata)
 from vllm.attention.backends.abstract import (
     AttentionBackend, 
     AttentionImpl,
@@ -20,8 +28,8 @@ from vllm.attention.ops.paged_attn import (
 from timber import paged_timber_attention, timber_attention
 
 @dataclass
-class FlashAttentionMetadata(AttentionMetadata):
-    """Metadata for FlashAttentionBackend.
+class HiPAttentionMetadata(AttentionMetadata, PagedAttentionMetadata):
+    """Metadata for XFormersbackend.
 
     NOTE: Any python object stored here is not updated when it is
     cuda-graph replayed. If you have values that need to be changed
@@ -34,7 +42,6 @@ class FlashAttentionMetadata(AttentionMetadata):
     # seq_lens stored as a tensor.
     seq_lens_tensor: Optional[torch.Tensor]
 
-    # NOTE(sang): Definition of context_len, query_len, and seq_len.
     # |---------- N-1 iteration --------|
     # |---------------- N iteration ---------------------|
     # |- tokenA -|......................|-- newTokens ---|
@@ -44,6 +51,7 @@ class FlashAttentionMetadata(AttentionMetadata):
 
     # Maximum query length in the batch. None for decoding.
     max_query_len: Optional[int]
+    # FIXME: It is for flash attn.
     # Maximum sequence length among prefill batch. 0 if there are decoding
     # requests only.
     max_prefill_seq_len: int
@@ -54,6 +62,7 @@ class FlashAttentionMetadata(AttentionMetadata):
     # the batch, used to index into subquery. E.g., if the subquery length
     # is [4, 6], it is [0, 4, 10].
     query_start_loc: Optional[torch.Tensor]
+    # FIXME: It is for flash attn.
     # (batch_size + 1,). The cumulative sequence lengths of the sequences in
     # the batch, used to index into sequence. E.g., if the sequence length is
     # [4, 6], it is [0, 4, 10].
@@ -62,24 +71,23 @@ class FlashAttentionMetadata(AttentionMetadata):
     # so far).
     context_lens_tensor: Optional[torch.Tensor]
 
-    # (batch_size, max_blocks_per_seq).
-    # Block addresses per sequence. (Seq id -> list of physical block)
-    # E.g., [0, 1, 2] means tokens are stored in 0th, 1st, and 2nd blocks
-    # in the kv cache. Each block can contain up to block_size tokens.
-    # 2nd dimensions are padded up to max_blocks_per_seq if it is cuda-graph
-    # captured.
-    block_tables: Optional[torch.Tensor]
-
     # Whether or not if cuda graph is enabled.
     # Cuda-graph is currently enabled for decoding only.
     # TODO(woosuk): Move `use_cuda_graph` out since it's unrelated to attention.
     use_cuda_graph: bool
+    _cached_prefill_metadata: Optional["XFormersMetadata"] = None
+    _cached_decode_metadata: Optional["XFormersMetadata"] = None
 
-    _cached_prefill_metadata: Optional["FlashAttentionMetadata"] = None
-    _cached_decode_metadata: Optional["FlashAttentionMetadata"] = None
+    def __post_init__(self):
+        # Set during the execution of the first attention op.
+        # It is a list because it is needed to set per prompt
+        # when alibi slopes is used. It is because of the limitation
+        # from xformer API.
+        # will not appear in the __repr__ and __init__
+        self.attn_bias: Optional[List[AttentionBias]] = None
 
     @property
-    def prefill_metadata(self) -> Optional["FlashAttentionMetadata"]:
+    def prefill_metadata(self) -> Optional["HiPAttentionMetadata"]:
         if self.num_prefills == 0:
             return None
 
@@ -91,9 +99,8 @@ class FlashAttentionMetadata(AttentionMetadata):
         assert self.query_start_loc is not None
         assert self.context_lens_tensor is not None
         assert self.block_tables is not None
-        assert self.seq_start_loc is not None
 
-        self._cached_prefill_metadata = FlashAttentionMetadata(
+        self._cached_prefill_metadata = HiPAttentionMetadata(
             num_prefills=self.num_prefills,
             num_prefill_tokens=self.num_prefill_tokens,
             num_decode_tokens=0,
@@ -104,7 +111,7 @@ class FlashAttentionMetadata(AttentionMetadata):
             max_prefill_seq_len=self.max_prefill_seq_len,
             max_decode_seq_len=0,
             query_start_loc=self.query_start_loc[:self.num_prefills + 1],
-            seq_start_loc=self.seq_start_loc[:self.num_prefills + 1],
+            seq_start_loc=None,
             context_lens_tensor=self.context_lens_tensor[:self.num_prefills],
             block_tables=self.block_tables[:self.num_prefills],
             use_cuda_graph=False,
@@ -112,7 +119,7 @@ class FlashAttentionMetadata(AttentionMetadata):
         return self._cached_prefill_metadata
 
     @property
-    def decode_metadata(self) -> Optional["FlashAttentionMetadata"]:
+    def decode_metadata(self) -> Optional["HiPAttentionMetadata"]:
         if self.num_decode_tokens == 0:
             return None
 
@@ -121,7 +128,7 @@ class FlashAttentionMetadata(AttentionMetadata):
         assert self.block_tables is not None
         assert self.seq_lens_tensor is not None
 
-        self._cached_decode_metadata = FlashAttentionMetadata(
+        self._cached_decode_metadata = HiPAttentionMetadata(
             num_prefills=0,
             num_prefill_tokens=0,
             num_decode_tokens=self.num_decode_tokens,
@@ -139,16 +146,41 @@ class FlashAttentionMetadata(AttentionMetadata):
         )
         return self._cached_decode_metadata
 
-class HiPAttentionImpl(AttentionImpl):
+class HiPAttentionImpl(AttentionImpl[HiPAttentionMetadata]):
+    """
+    If the input tensors contain prompt tokens, the layout is as follows:
+    |<--------------- num_prefill_tokens ----------------->|	
+    |<--prefill_0-->|<--prefill_1-->|...|<--prefill_N-1--->|
+
+    Otherwise, the layout is as follows:	
+    |<----------------- num_decode_tokens ------------------>|	
+    |<--decode_0-->|..........|<--decode_M-1-->|<--padding-->|
+
+    Generation tokens can contain padding when cuda-graph is used.
+    Currently, prompt tokens don't contain any padding.
+
+    The prompts might have different lengths, while the generation tokens
+    always have length 1.
+
+    If chunked prefill is enabled, prefill tokens and decode tokens can be
+    batched together in a flattened 1D query.
+
+    |<----- num_prefill_tokens ---->|<------- num_decode_tokens --------->|
+    |<-prefill_0->|...|<-prefill_N-1->|<--decode_0-->|...|<--decode_M-1-->|
+
+    Currently, cuda graph is disabled for chunked prefill, meaning there's no
+    padding between prefill and decode tokens.
+    """
+    
     def __init__(
         self,
         num_heads: int,
         head_size: int,
         scale: float,
-        num_kv_heads: Optional[int] = None,
-        alibi_slopes: Optional[List[float]] = None,
-        sliding_window: Optional[int] = None,
-        kv_cache_dtype: str = "auto",
+        num_kv_heads: int,
+        alibi_slopes: Optional[List[float]],
+        sliding_window: Optional[int],
+        kv_cache_dtype: str,
         blocksparse_params: Optional[Dict[str, Any]] = None,
         layer_index: Optional[int] = None,
     ) -> None:
@@ -173,18 +205,18 @@ class HiPAttentionImpl(AttentionImpl):
                 f"Supported head sizes are: {suppored_head_sizes}."
             )
 
-        self.sliding_window = (
-            (self.sliding_window, self.sliding_window) 
-            if self.sliding_window is not None else 
-            (-1, -1)
-        )
+        # self.sliding_window = (
+        #     (self.sliding_window, self.sliding_window) 
+        #     if self.sliding_window is not None else 
+        #     (-1, -1)
+        # )
         self.kv_cache_dtype = kv_cache_dtype
         self.layer_index = layer_index
         assert layer_index is not None, 'layer index should be not none'
         
         self.hip_k = int(os.environ.get('HIP_K', '1024'))
         self.hip_dense_layers = list(range(int(os.environ.get('HIP_DENSE_LAYERS', '3'))))
-        self.hip_high_k_layers = {}
+        # self.hip_high_k_layers = {}
         
         self.self_extend_scale = int(os.getenv('SE_SCALE', '8'))
         self.self_extend_window = int(os.getenv('SE_WINDOW', '1024'))
@@ -203,7 +235,7 @@ class HiPAttentionImpl(AttentionImpl):
         key: torch.Tensor,
         value: torch.Tensor,
         kv_cache: torch.Tensor,
-        attn_metadata: FlashAttentionMetadata,
+        attn_metadata: HiPAttentionMetadata,
         
         kv_scale: float = 1.0,
         
@@ -224,7 +256,7 @@ class HiPAttentionImpl(AttentionImpl):
             shape = [num_tokens, num_heads * head_size]
         """
         # NOTE(woosuk): FlashAttention does not support FP8 KV cache.
-        assert kv_scale == 1.0, "kv_scale is not supported in FlashAttention."
+        assert kv_scale == 1.0, "kv_scale is not supported in HiPAttention."
 
         num_tokens, hidden_size = query.shape
         # Reshape the query, key, and value tensors.
@@ -233,25 +265,38 @@ class HiPAttentionImpl(AttentionImpl):
         value = value.view(-1, self.num_kv_heads, self.head_size)
 
         if kv_cache is not None:
-            key_cache = kv_cache[0]
-            value_cache = kv_cache[1]
+            key_cache, value_cache = PagedAttention.split_kv_cache(
+                kv_cache, self.num_kv_heads, self.head_size)
 
             # Reshape the input keys and values and store them in the cache.
             # If kv_cache is not provided, the new key and value tensors are
             # not cached. This happens during the initial memory profiling run.
-            cache_ops.reshape_and_cache_flash(
-                key,
-                value,
-                
-                str(key_cache.data_ptr()),
-                key_cache.size(1),
-                key_cache.stride(0),
-                str(value_cache.data_ptr()),
-                value_cache.stride(0),
-                
-                attn_metadata.slot_mapping.flatten(),
-                self.kv_cache_dtype,
+            
+            PagedAttention.write_to_paged_cache(
+                key, 
+                value, 
+                key_cache,
+                value_cache,
+                attn_metadata.slot_mapping,
+                self.kv_cache_dtype, 
+                kv_scale
             )
+            
+            # print(key.dtype, value.dtype, key_cache.dtype, value_cache.dtype)
+            
+            # cache_ops.reshape_and_cache_flash(
+            #     key,
+            #     value,
+                
+            #     str(key_cache.data_ptr()),
+            #     key_cache.size(1),
+            #     key_cache.stride(0),
+            #     str(value_cache.data_ptr()),
+            #     value_cache.stride(0),
+                
+            #     attn_metadata.slot_mapping.flatten(),
+            #     self.kv_cache_dtype,
+            # )
 
         num_prefill_tokens = attn_metadata.num_prefill_tokens
         num_decode_tokens = attn_metadata.num_decode_tokens
@@ -269,66 +314,64 @@ class HiPAttentionImpl(AttentionImpl):
         assert query.shape[0] == num_prefill_tokens
         assert decode_query.shape[0] == num_decode_tokens
         
-        prompt_method = 'vllm'
+        prompt_method = 'hip'
         decode_method = 'hip'
         if self.layer_index in self.hip_dense_layers:
             decode_method = 'vllm'
 
         if prefill_meta := attn_metadata.prefill_metadata:
-            assert prompt_method == 'vllm'
-            
             # Prompt run.
-            if (kv_cache is None or prefill_meta.block_tables is None
-                    or prefill_meta.block_tables.numel() == 0):
-                # normal attention
-                # When block_tables are not filled, it means q and k are the
-                # prompt, and they have the same length.
-                out = flash_attn_varlen_func(
-                    q=query,
-                    k=key,
-                    v=value,
-                    cu_seqlens_q=prefill_meta.seq_start_loc,
-                    cu_seqlens_k=prefill_meta.seq_start_loc,
-                    max_seqlen_q=prefill_meta.max_prefill_seq_len,
-                    max_seqlen_k=prefill_meta.max_prefill_seq_len,
-                    softmax_scale=self.scale,
-                    causal=True,
-                    window_size=self.sliding_window,
-                    alibi_slopes=self.alibi_slopes,
+            if kv_cache is None or prefill_meta.block_tables.numel() == 0:
+                # normal attention.
+                # block tables are empty if the prompt does not have a cached
+                # prefix.
+                out = self._run_memory_efficient_xformers_forward(
+                    query, 
+                    key, 
+                    value, 
+                    prefill_meta,
+                    method=prompt_method,
                 )
-                assert output[:num_prefill_tokens].shape == out.shape
+                assert out.shape == output[:num_prefill_tokens].shape
                 output[:num_prefill_tokens] = out
             else:
                 # prefix-enabled attention
-                assert prefill_meta.seq_lens is not None
-                max_seq_len = max(prefill_meta.seq_lens)
-                output[:num_prefill_tokens] = flash_attn_varlen_func(
-                    q=query,
-                    k=key_cache,
-                    v=value_cache,
-                    cu_seqlens_q=prefill_meta.query_start_loc,
-                    max_seqlen_q=prefill_meta.max_query_len,
-                    cu_seqlens_k=prefill_meta.seq_start_loc,
-                    max_seqlen_k=max_seq_len,
-                    softmax_scale=self.scale,
-                    causal=True,
-                    alibi_slopes=self.alibi_slopes,
-                    block_table=prefill_meta.block_tables,
+                # TODO(Hai) this triton kernel has regression issue (broke) to
+                # deal with different data types between KV and FP8 KV cache,
+                # to be addressed separately.
+                out = PagedAttention.forward_prefix(
+                    query,
+                    key,
+                    value,
+                    key_cache,
+                    value_cache,
+                    prefill_meta.block_tables,
+                    prefill_meta.query_start_loc,
+                    prefill_meta.seq_lens_tensor,
+                    prefill_meta.context_lens_tensor,
+                    prefill_meta.max_query_len,
+                    self.alibi_slopes,
+                    self.sliding_window,
                 )
+                assert output[:num_prefill_tokens].shape == out.shape
+                output[:num_prefill_tokens] = out
 
         if decode_meta := attn_metadata.decode_metadata:
             # Decoding run.
             if decode_method == 'vllm':
-                output[num_prefill_tokens:] = flash_attn_with_kvcache(
-                    decode_query.unsqueeze(1),
+                output[num_prefill_tokens:] = PagedAttention.forward_decode(
+                    decode_query,
                     key_cache,
                     value_cache,
-                    block_table=decode_meta.block_tables,
-                    cache_seqlens=decode_meta.seq_lens_tensor,
-                    softmax_scale=self.scale,
-                    causal=True,
-                    alibi_slopes=self.alibi_slopes,
-                ).squeeze(1)
+                    decode_meta.block_tables,
+                    decode_meta.seq_lens_tensor,
+                    decode_meta.max_decode_seq_len,
+                    self.kv_cache_dtype,
+                    self.num_kv_heads,
+                    self.scale,
+                    self.alibi_slopes,
+                    kv_scale,
+                )
             elif decode_method == 'hip':
                 assert rope_method in ['none', 'self_extend']
                 assert self.alibi_slopes is None
@@ -337,23 +380,12 @@ class HiPAttentionImpl(AttentionImpl):
                 
                 assert decode_query.ndim == 3
                 
-                NUM_BLOCKS, BLOCK_SIZE, NUM_HEADS, HEAD_SIZE = key_cache.shape
-                X_DIM = 32
-                
-                # hip was developed with old version... 
-                # [num_blocks, num_kv_heads, head_size/x, block_size, x]
-                _k = key_cache.view(NUM_BLOCKS, BLOCK_SIZE, NUM_HEADS, HEAD_SIZE // X_DIM, X_DIM).permute(0, 2, 3, 1, 4)
-                assert _k.shape == (NUM_BLOCKS, NUM_HEADS, HEAD_SIZE // X_DIM, BLOCK_SIZE, X_DIM)
-                assert _k.data_ptr() == key_cache.data_ptr()
-                # [num_blocks, num_kv_heads, head_size, block_size]
-                _v = value_cache.permute(0, 2, 3, 1)
-                assert _v.shape == (NUM_BLOCKS, NUM_HEADS, HEAD_SIZE, BLOCK_SIZE)
-                assert _v.data_ptr() == value_cache.data_ptr()
+                _k = key_cache
+                _v = value_cache
                 
                 attn_output, (indices, ks, _) = paged_timber_attention(
                     q=decode_query,
                     q_scale=self.scale,
-                    # q_scale=1.0,
                     k=_k,
                     v=_v,
                     attention_mask=None,
@@ -388,8 +420,151 @@ class HiPAttentionImpl(AttentionImpl):
                 output[num_prefill_tokens:] = attn_output
 
         # Reshape the output tensor.
-        return output.view(num_tokens, hidden_size)
+        return output.view(-1, self.num_heads * self.head_size)
 
+    def _run_memory_efficient_xformers_forward(
+        self,
+        query: torch.Tensor,
+        key: torch.Tensor,
+        value: torch.Tensor,
+        attn_metadata: HiPAttentionMetadata,
+        method: Literal['hip', 'vllm'] = 'vllm',
+        rope_method: Literal['none', 'self_extend'] = 'none',
+        rope_cos: Optional[torch.Tensor] = None,
+        rope_sin: Optional[torch.Tensor] = None,
+        position_ids: Optional[torch.Tensor] = None,
+    ) -> torch.Tensor:
+        """Attention for 1D query of multiple prompts. Multiple prompt
+        tokens are flattened in to `query` input.
+
+        See https://facebookresearch.github.io/xformers/components/ops.html
+        for API spec.
+
+        Args:
+            output: shape = [num_prefill_tokens, num_heads, head_size]
+            query: shape = [num_prefill_tokens, num_heads, head_size]
+            key: shape = [num_prefill_tokens, num_kv_heads, head_size]
+            value: shape = [num_prefill_tokens, num_kv_heads, head_size]
+            attn_metadata: Metadata for attention.
+        """
+        if method == 'vllm':
+            assert attn_metadata.seq_lens is not None
+            original_query = query
+            if self.num_kv_heads != self.num_heads:
+                # GQA/MQA requires the shape [B, M, G, H, K].
+                # Note that the output also has the same shape (which is different
+                # from a spec from the doc).
+                query = query.view(query.shape[0], self.num_kv_heads,
+                                self.num_queries_per_kv, query.shape[-1])
+                key = key[:, :,
+                        None, :].expand(key.shape[0], self.num_kv_heads,
+                                        self.num_queries_per_kv, key.shape[-1])
+                value = value[:, :,
+                            None, :].expand(value.shape[0], self.num_kv_heads,
+                                            self.num_queries_per_kv,
+                                            value.shape[-1])
+            # Set attention bias if not provided. This typically happens at
+            # the very attention layer of every iteration.
+            # FIXME(woosuk): This is a hack.
+            if attn_metadata.attn_bias is None:
+                if self.alibi_slopes is None:
+                    attn_bias = BlockDiagonalCausalMask.from_seqlens(
+                        attn_metadata.seq_lens)
+                    if self.sliding_window is not None:
+                        attn_bias = attn_bias.make_local_attention(
+                            self.sliding_window)
+                    attn_metadata.attn_bias = [attn_bias]
+                else:
+                    attn_metadata.attn_bias = _make_alibi_bias(
+                        self.alibi_slopes, self.num_kv_heads, query.dtype,
+                        attn_metadata.seq_lens)
+
+            # No alibi slopes.
+            # TODO(woosuk): Too many view operations. Let's try to reduce
+            # them in the future for code readability.
+            if self.alibi_slopes is None:
+                # Add the batch dimension.
+                query = query.unsqueeze(0)
+                key = key.unsqueeze(0)
+                value = value.unsqueeze(0)
+                out = xops.memory_efficient_attention_forward(
+                    query,
+                    key,
+                    value,
+                    attn_bias=attn_metadata.attn_bias[0],
+                    p=0.0,
+                    scale=self.scale)
+                return out.view_as(original_query)
+
+            # Attention with alibi slopes.
+            # FIXME(woosuk): Because xformers does not support dynamic sequence
+            # lengths with custom attention bias, we process each prompt one by
+            # one. This is inefficient, especially when we have many short prompts.
+            output = torch.empty_like(original_query)
+            start = 0
+            for i, seq_len in enumerate(attn_metadata.seq_lens):
+                end = start + seq_len
+                out = xops.memory_efficient_attention_forward(
+                    query[None, start:end],
+                    key[None, start:end],
+                    value[None, start:end],
+                    attn_bias=attn_metadata.attn_bias[i],
+                    p=0.0,
+                    scale=self.scale)
+                # TODO(woosuk): Unnecessary copy. Optimize.
+                output[start:end].copy_(out.view_as(original_query[start:end]))
+                start += seq_len
+            return output
+        elif method == 'hip':
+            assert rope_method in ['none', 'self_extend']
+            
+            warnings.warn('prompt attention backend is hip')
+            
+            original_query = query
+            
+            query_batch_first = query.permute(1, 0, 2)
+            key_batch_first = key.permute(1, 0, 2)
+            value_batch_first = value.permute(1, 0, 2)
+            
+            output = torch.empty_like(original_query)
+            start = 0
+            for i, seq_len in enumerate(attn_metadata.seq_lens):
+                end = start + seq_len
+                # out = xops.memory_efficient_attention_forward(
+                #     query[None, start:end],
+                #     key[None, start:end],
+                #     value[None, start:end],
+                #     attn_bias=attn_metadata.attn_bias[i],
+                #     p=0.0,
+                #     scale=self.scale
+                # )
+                
+                out, _ = timber_attention(
+                    q=query_batch_first[:, start:end] * self.scale,
+                    k=key_batch_first[:, start:end],
+                    v=value_batch_first[:, start:end],
+                    attention_mask=None,
+                    
+                    mask_k=self.hip_k,
+                    block_size_q=32,
+                    block_size_k=2,
+                    
+                    dense_queries_exp=None if rope_method == 'none' else 0,
+                    
+                    rope_method=rope_method,
+                    rope_cos=rope_cos,
+                    rope_sin=rope_sin,
+                    position_ids=position_ids.repeat_interleave(self.num_heads, 0) if rope_method != 'none' else None,
+                    
+                    self_extend_scale=self.self_extend_scale,
+                    self_extend_window=self.self_extend_window,
+                )
+                
+                # TODO(woosuk): Unnecessary copy. Optimize.
+                output[start:end].copy_(out.permute(1, 0, 2))
+                start += seq_len
+            return output
+    
     def forward_old(
         self,
         query: torch.Tensor,
@@ -645,21 +820,18 @@ class HiPAttentionImpl(AttentionImpl):
         return output.view(batch_size, seq_len, hidden_size)
 
 class HiPAttentionBackend(AttentionBackend):
-    @staticmethod
-    def get_supported_head_sizes() -> List[int]:
-        return [32, 64, 96, 128, 160, 192, 224, 256]
-
+    
     @staticmethod
     def get_name() -> str:
-        return "flash-attn"
+        return "xformers"
 
     @staticmethod
     def get_impl_cls() -> Type["HiPAttentionImpl"]:
         return HiPAttentionImpl
 
     @staticmethod
-    def make_metadata(*args, **kwargs) -> "FlashAttentionMetadata":
-        return FlashAttentionMetadata(*args, **kwargs)
+    def make_metadata(*args, **kwargs) -> "HiPAttentionMetadata":
+        return HiPAttentionMetadata(*args, **kwargs)
 
     @staticmethod
     def get_kv_cache_shape(
@@ -668,29 +840,55 @@ class HiPAttentionBackend(AttentionBackend):
         num_kv_heads: int,
         head_size: int,
     ) -> Tuple[int, ...]:
-        if block_size % 16 != 0:
-            raise ValueError("Block size must be a multiple of 16.")
-        return (2, num_blocks, block_size, num_kv_heads, head_size)
+        return PagedAttention.get_kv_cache_shape(num_blocks, block_size,
+                                                 num_kv_heads, head_size)
 
     @staticmethod
     def swap_blocks(
         src_kv_cache: torch.Tensor,
         dst_kv_cache: torch.Tensor,
-        src_to_dst: torch.Tensor,
+        src_to_dst: Dict[int, int],
     ) -> None:
-        src_key_cache = src_kv_cache[0]
-        dst_key_cache = dst_kv_cache[0]
-        cache_ops.swap_blocks(src_key_cache, dst_key_cache, src_to_dst)
-
-        src_value_cache = src_kv_cache[1]
-        dst_value_cache = dst_kv_cache[1]
-        cache_ops.swap_blocks(src_value_cache, dst_value_cache, src_to_dst)
+        PagedAttention.swap_blocks(src_kv_cache, dst_kv_cache, src_to_dst)
 
     @staticmethod
     def copy_blocks(
         kv_caches: List[torch.Tensor],
         src_to_dists: torch.Tensor,
     ) -> None:
-        key_caches = [kv_cache[0] for kv_cache in kv_caches]
-        value_caches = [kv_cache[1] for kv_cache in kv_caches]
-        cache_ops.copy_blocks(key_caches, value_caches, src_to_dists)
+        PagedAttention.copy_blocks(kv_caches, src_to_dists)
+
+def _make_alibi_bias(
+    alibi_slopes: torch.Tensor,
+    num_kv_heads: int,
+    dtype: torch.dtype,
+    seq_lens: List[int],
+) -> LowerTriangularMaskWithTensorBias:
+    attn_biases = []
+    for seq_len in seq_lens:
+        bias = torch.arange(seq_len, dtype=dtype)
+        # NOTE(zhuohan): HF uses
+        #     `bias = bias[None, :].repeat(seq_len, 1)`
+        # here. We find that both biases give the same results, but
+        # the bias below more accurately follows the original ALiBi
+        # paper.
+        # Calculate a matrix where each element represents ith element- jth
+        # element.
+        bias = bias[None, :] - bias[:, None]
+
+        padded_len = (seq_len + 7) // 8 * 8
+        num_heads = alibi_slopes.shape[0]
+        bias = torch.empty(
+            1,  # batch size
+            num_heads,
+            seq_len,
+            padded_len,
+            device=alibi_slopes.device,
+            dtype=dtype,
+        )[:, :, :, :seq_len].copy_(bias)
+        bias.mul_(alibi_slopes[:, None, None])
+        if num_heads != num_kv_heads:
+            bias = bias.unflatten(1, (num_kv_heads, num_heads // num_kv_heads))
+        attn_biases.append(LowerTriangularMaskWithTensorBias(bias))
+
+    return attn_biases
