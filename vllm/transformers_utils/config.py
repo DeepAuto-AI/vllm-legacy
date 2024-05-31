@@ -51,7 +51,7 @@ def get_config(model: str,
                                               revision=revision,
                                               code_revision=code_revision)
     
-    if 'timber' in [os.getenv('PAGED_ATTENTION_BACKEND', 'timber'), os.getenv('PROMPT_ATTENTION_BACKEND', 'timber')] and hasattr(config, 'sliding_window'):
+    if os.getenv('DISABLE_SLIDING_WINDOW', '0') == 1 and hasattr(config, 'sliding_window'):
         logger.info(f'sliding window ({config.sliding_window}) disabled -> {config.max_position_embeddings}')
         config.sliding_window = config.max_position_embeddings
     

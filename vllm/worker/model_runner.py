@@ -8,6 +8,7 @@ import torch
 import torch.nn as nn
 
 from vllm.attention import AttentionMetadata, get_attn_backend
+from vllm.attention.backends.hip import HiPAttentionBackend, HiPAttentionImpl
 from vllm.config import (CacheConfig, DeviceConfig, LoadConfig, LoRAConfig,
                          ModelConfig, ParallelConfig, SchedulerConfig,
                          VisionLanguageConfig)
@@ -151,7 +152,12 @@ class ModelRunner:
         # Set after load_model.
         self.lora_manager: Optional[LRUCacheWorkerLoRAManager] = None
         
-        self.hip_refresh_interval = int(os.getenv('HIP_REFRESH_INTERVAL', '1'))
+        self.hip_refresh_interval = int(os.getenv('HIP_REFRESH_INTERVAL', '8'))
+        self.is_hip_attention = self.attn_backend == HiPAttentionBackend
+        
+        if not self.is_hip_attention:
+            self.hip_refresh_interval = 1
+        
         self.metrics = {
             True: { # is prompt
                 'model': MetricTracer(),
@@ -1035,6 +1041,7 @@ class ModelRunner:
                         kv_caches,
                         attn_metadata,
                         memory_pool=self.graph_memory_pool,
+                        stream=graph_capture_context.stream,
                     )
                     self.graph_memory_pool = graph_runner_checkout.graph.pool()
                     
@@ -1159,8 +1166,8 @@ class CUDAGraphRunner:
         if need_checkout_hip_caches:
             for m in self.model.modules():
                 if isinstance(m, Attention):
-                    backend = m.backend # type: HiPAttentionBackend
-                    assert isinstance(backend, HiPAttentionBackend)
+                    backend = m.impl # type: HiPAttentionImpl
+                    assert isinstance(backend, HiPAttentionImpl)
                     backend.checkout_last = True
                     backend.last_indices = None
                     backend.last_ks = None
@@ -1170,8 +1177,8 @@ class CUDAGraphRunner:
             idx_module = 0
             for m in self.model.modules():
                 if isinstance(m, Attention):
-                    backend = m.impl # type: HiPAttentionBackend
-                    assert isinstance(backend, HiPAttentionBackend)
+                    backend = m.impl # type: HiPAttentionImpl
+                    assert isinstance(backend, HiPAttentionImpl)
                     backend.using_precomputed_mask = True
                     backend.checkout_last = False
                     backend.precomputed_indices = self.precomputed_hip_caches[idx_module][1]
@@ -1180,8 +1187,8 @@ class CUDAGraphRunner:
         else:
             for m in self.model.modules():
                 if isinstance(m, Attention):
-                    backend = m.impl # type: HiPAttentionBackend
-                    if isinstance(backend, HiPAttentionBackend):
+                    backend = m.impl # type: HiPAttentionImpl
+                    if isinstance(backend, HiPAttentionImpl):
                         backend.using_precomputed_mask = False
         
         # Run the model once without capturing the graph.
@@ -1212,7 +1219,7 @@ class CUDAGraphRunner:
             last_hip_caches = []
             for name, m in self.model.named_modules():
                 if isinstance(m, Attention):
-                    backend = m.backend # type: HiPAttentionBackend
+                    backend = m.impl # type: HiPAttentionImpl
                     backend.checkout_last = False
                     
                     last_hip_caches.append([
@@ -1229,7 +1236,7 @@ class CUDAGraphRunner:
         for m in self.model.modules():
             if isinstance(m, Attention):
                 backend = m.impl
-                if isinstance(backend, HiPAttentionBackend):
+                if isinstance(backend, HiPAttentionImpl):
                     backend.checkout_last = False
                     backend.using_precomputed_mask = False
                     backend.last_indices = None
@@ -1277,7 +1284,7 @@ class CUDAGraphRunner:
         # prefetch previously accessed tokens
         if self.offload_prefetch and self.need_offload_prefetch:
             from vllm.model_executor.layers.attention import Attention
-            from third_party.vllm.vllm.attention.backends.hip import HiPAttentionBackend
+            from third_party.vllm.vllm.attention.backends.hip import HiPAttentionImpl
             from vllm.worker.cache_engine.map_cache_engine import MapCacheEngine, ManagedTensor
             kv_caches = self.input_buffers['kv_caches']
             hip_caches = self.output_buffers['hip_caches']
