@@ -182,6 +182,7 @@ class HiPAttentionImpl(AttentionImpl):
         self.layer_index = layer_index
         assert layer_index is not None, 'layer index should be not none'
         
+        self.hip_k = int(os.environ.get('HIP_K', '1024'))
         self.hip_dense_layers = list(range(int(os.environ.get('HIP_DENSE_LAYERS', '3'))))
         self.hip_high_k_layers = {}
         
@@ -203,7 +204,13 @@ class HiPAttentionImpl(AttentionImpl):
         value: torch.Tensor,
         kv_cache: torch.Tensor,
         attn_metadata: FlashAttentionMetadata,
+        
         kv_scale: float = 1.0,
+        
+        rope_method: Literal['none', 'self_extend'] = 'none',
+        rope_cos: Optional[torch.Tensor] = None,
+        rope_sin: Optional[torch.Tensor] = None,
+        position_ids: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
         """Forward pass with FlashAttention.
 
@@ -261,8 +268,15 @@ class HiPAttentionImpl(AttentionImpl):
 
         assert query.shape[0] == num_prefill_tokens
         assert decode_query.shape[0] == num_decode_tokens
+        
+        prompt_method = 'vllm'
+        decode_method = 'hip'
+        if self.layer_index in self.hip_dense_layers:
+            decode_method = 'vllm'
 
         if prefill_meta := attn_metadata.prefill_metadata:
+            assert prompt_method == 'vllm'
+            
             # Prompt run.
             if (kv_cache is None or prefill_meta.block_tables is None
                     or prefill_meta.block_tables.numel() == 0):
@@ -304,16 +318,74 @@ class HiPAttentionImpl(AttentionImpl):
 
         if decode_meta := attn_metadata.decode_metadata:
             # Decoding run.
-            output[num_prefill_tokens:] = flash_attn_with_kvcache(
-                decode_query.unsqueeze(1),
-                key_cache,
-                value_cache,
-                block_table=decode_meta.block_tables,
-                cache_seqlens=decode_meta.seq_lens_tensor,
-                softmax_scale=self.scale,
-                causal=True,
-                alibi_slopes=self.alibi_slopes,
-            ).squeeze(1)
+            if decode_method == 'vllm':
+                output[num_prefill_tokens:] = flash_attn_with_kvcache(
+                    decode_query.unsqueeze(1),
+                    key_cache,
+                    value_cache,
+                    block_table=decode_meta.block_tables,
+                    cache_seqlens=decode_meta.seq_lens_tensor,
+                    softmax_scale=self.scale,
+                    causal=True,
+                    alibi_slopes=self.alibi_slopes,
+                ).squeeze(1)
+            elif decode_method == 'hip':
+                assert rope_method in ['none', 'self_extend']
+                assert self.alibi_slopes is None
+                
+                warnings.warn('paged attention backend is hip')
+                
+                assert decode_query.ndim == 3
+                
+                NUM_BLOCKS, BLOCK_SIZE, NUM_HEADS, HEAD_SIZE = key_cache.shape
+                X_DIM = 32
+                
+                # hip was developed with old version... 
+                # [num_blocks, num_kv_heads, head_size/x, block_size, x]
+                _k = key_cache.view(NUM_BLOCKS, BLOCK_SIZE, NUM_HEADS, HEAD_SIZE // X_DIM, X_DIM).permute(0, 2, 3, 1, 4)
+                assert _k.shape == (NUM_BLOCKS, NUM_HEADS, HEAD_SIZE // X_DIM, BLOCK_SIZE, X_DIM)
+                assert _k.data_ptr() == key_cache.data_ptr()
+                # [num_blocks, num_kv_heads, head_size, block_size]
+                _v = value_cache.permute(0, 2, 3, 1)
+                assert _v.shape == (NUM_BLOCKS, NUM_HEADS, HEAD_SIZE, BLOCK_SIZE)
+                assert _v.data_ptr() == value_cache.data_ptr()
+                
+                attn_output, (indices, ks, _) = paged_timber_attention(
+                    q=decode_query,
+                    q_scale=self.scale,
+                    # q_scale=1.0,
+                    k=_k,
+                    v=_v,
+                    attention_mask=None,
+                    
+                    block_tables=attn_metadata.block_tables,
+                    context_lens=attn_metadata.seq_lens_tensor,
+                    max_context_len=attn_metadata.max_decode_seq_len,
+                    
+                    mask_k=self.hip_k,
+                    block_size_q=32,
+                    block_size_k=2,
+                    
+                    rope_method=rope_method,
+                    rope_cos=rope_cos,
+                    rope_sin=rope_sin,
+                    position_ids=position_ids.repeat_interleave(self.num_heads, 0) if rope_method != 'none' else None,
+                    
+                    self_extend_scale=self.self_extend_scale,
+                    self_extend_window=self.self_extend_window,
+                    
+                    using_precomputed_mask=self.using_precomputed_mask,
+                    precomputed_ks=self.precomputed_ks,
+                    precomputed_indices=self.precomputed_indices,
+                )
+                attn_output = attn_output.view(*decode_query.shape)
+                
+                if self.checkout_last:
+                    self.last_ks = ks
+                    self.last_indices = indices
+                
+                assert output[num_prefill_tokens:].shape == attn_output.shape, f'{output[num_prefill_tokens:].shape} == {attn_output.shape}'
+                output[num_prefill_tokens:] = attn_output
 
         # Reshape the output tensor.
         return output.view(num_tokens, hidden_size)

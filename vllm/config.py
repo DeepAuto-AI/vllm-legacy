@@ -1163,9 +1163,9 @@ def _get_and_verify_dtype(
 def _get_and_verify_max_len(
     hf_config: PretrainedConfig,
     max_model_len: Optional[int],
-    allow_extend: bool = False,
     disable_sliding_window: bool,
     sliding_window_len: Optional[int],
+    allow_extend: bool = False,
 ) -> int:
     """Get and verify the model's maximum length."""
     derived_max_model_len = float("inf")

@@ -221,7 +221,6 @@ class LlamaDecoderLayer(nn.Module):
             quant_config=quant_config,
             bias=attention_bias,
             layer_index=layer_index,
-            sliding_window=sliding_window,
             cache_config=cache_config,
         )
         self.mlp = LlamaMLP(

@@ -689,8 +689,6 @@ class ModelRunner:
 
             metadata_dict = {
                 "input_tokens": input_tokens,
-                "input_embeds": input_embeds,
-                "input_im_masks": input_im_masks,
                 "input_positions": input_positions,
                 "selected_token_indices":
                 sampling_metadata.selected_token_indices,
@@ -756,8 +754,6 @@ class ModelRunner:
         if BENCHMARK_RUNNER: start_prepare.record()
         (
             input_tokens,
-            input_embeds,
-            input_im_masks,
             input_positions, 
             attn_metadata, 
             sampling_metadata, 
