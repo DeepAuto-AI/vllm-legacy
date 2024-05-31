@@ -68,6 +68,10 @@ class CacheEngine:
         pin_memory = is_pin_memory_available() if device == "cpu" else False
         kv_cache: List[torch.Tensor] = []
         for _ in range(self.num_layers):
+            # null block in CpuGpuBlockAllocator requires at least that
+            # block to be zeroed-out.
+            # We zero-out everything for simplicity.
+            
             layer = torch.empty(
                 kv_cache_shape,
                 dtype=self.dtype,
