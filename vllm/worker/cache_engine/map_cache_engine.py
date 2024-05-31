@@ -6,7 +6,9 @@ import torch
 import numpy as np
 import cupy as cp
 from typing import List, Tuple
-from .cache_engine import CacheConfig, CacheEngine, KVCache, init_logger, ModelConfig, ParallelConfig, STR_DTYPE_TO_TORCH_DTYPE, _get_dtype_size
+from .cache_engine import CacheConfig, CacheEngine, init_logger, ModelConfig, ParallelConfig, STR_DTYPE_TO_TORCH_DTYPE, _get_dtype_size
+
+KVCache = torch.Tensor
 
 logger = init_logger(__name__)
 
