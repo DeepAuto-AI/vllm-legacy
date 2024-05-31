@@ -3,6 +3,7 @@ import math
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Dict, List, Optional, Tuple, Union
 
+import einops
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -88,7 +89,13 @@ def _apply_lora(
     x = x.view(-1, x.shape[-1])
     output = output.view(-1, output.shape[-1])
     indices = indices.view(-1)
-    add_lora(output, x, lora_a_stacked, lora_b_stacked, indices, 0, 1.0)
+    lora_rank = lora_a_stacked.shape[-2]
+    if lora_rank >= 128:
+        # FIXME: This is a workaround for punica not supporting rank >= 128
+        output.add_(einops.einsum(x, lora_a_stacked[0, 0], lora_b_stacked[0, 0],
+                                  "b h, r h, o r -> b o"))
+    else:
+        add_lora(output, x, lora_a_stacked, lora_b_stacked, indices, 0, 1.0)
     return output.view_as(org_output)
 
 
@@ -345,6 +352,15 @@ class VocabParallelEmbeddingWithLoRA(BaseLayerWithLoRA):
                           lora_config: LoRAConfig, packed_modules_list: List,
                           model_config: Optional[PretrainedConfig]) -> bool:
         return type(source_layer) is VocabParallelEmbedding
+
+
+def get_device(layer):
+    if hasattr(layer, "weight"):
+        return layer.weight.device
+    elif hasattr(layer, "qweight"):
+        return layer.qweight.device
+    else:
+        raise ValueError("Unknown layer type")
 
 
 class ColumnParallelLinearWithLoRA(BaseLayerWithLoRA):

@@ -1,3 +1,4 @@
+import os
 import time
 from contextlib import contextmanager
 from typing import TYPE_CHECKING, ClassVar, Iterable, List, Optional
@@ -975,3 +976,8 @@ class LLMEngine:
 
     def check_health(self) -> None:
         self.model_executor.check_health()
+
+    def _init_image_encoder(self, vit_weights_path):
+        import torch
+        # FIXME: Use last device for image encoder for now
+        self.image_encoder = ImageEncoder(vit_weights_path, device=f"cuda:{torch.cuda.device_count() - 1}")

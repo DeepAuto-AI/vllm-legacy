@@ -30,6 +30,7 @@ _GENERATION_MODELS = {
     "InternLMForCausalLM": ("llama", "LlamaForCausalLM"),
     "InternLM2ForCausalLM": ("internlm2", "InternLM2ForCausalLM"),
     "JAISLMHeadModel": ("jais", "JAISLMHeadModel"),
+    "InternLMXComposer2": ("internlm_xcomposer2", "InternLM2ForCausalLM"),
     "LlamaForCausalLM": ("llama", "LlamaForCausalLM"),
     "LlavaForConditionalGeneration":
     ("llava", "LlavaForConditionalGeneration"),

@@ -117,6 +117,8 @@ class SequenceData:
         self,
         prompt_token_ids: List[int],
         output_token_ids: Optional[List[int]] = None,
+        prompt_embeds: Optional["torch.Tensor"] = None,
+        prompt_im_masks: Optional[List[int]] = None,
     ) -> None:
         if output_token_ids is None:
             output_token_ids = []
@@ -224,6 +226,8 @@ class Sequence:
         block_size: int,
         eos_token_id: Optional[int] = None,
         lora_request: Optional[LoRARequest] = None,
+        prompt_embeds: Optional["torch.Tensor"] = None,
+        prompt_im_masks: Optional[List[int]] = None,
     ) -> None:
         self.seq_id = seq_id
         self.inputs = inputs

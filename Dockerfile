@@ -107,6 +107,10 @@ RUN --mount=type=bind,from=build,src=/workspace/dist,target=/vllm-workspace/dist
 # note that this uses vllm installed by `pip`
 FROM vllm-base AS test
 
+# copy pytorch extensions separately to avoid having to rebuild
+WORKDIR /vllm-workspace
+# when python code changes
+# ADD is used to preserve directory structure
 ADD . /vllm-workspace/
 
 # install development dependencies (for testing)
@@ -131,6 +135,15 @@ RUN --mount=type=cache,target=/root/.cache/pip \
     pip install accelerate hf_transfer modelscope
 
 ENV VLLM_USAGE_SOURCE production-docker-image
+# install timber
+RUN mkdir /workspace/timber
+COPY --from=timber timber /workspace/timber/timber
+COPY --from=timber setup.py /workspace/timber/setup.py
+RUN pip install -e /workspace/timber \
+    && pip install numba
+
+COPY --from=build /workspace/vllm/*.so /workspace/vllm/
+COPY vllm vllm
 
 ENTRYPOINT ["python3", "-m", "vllm.entrypoints.openai.api_server"]
 #################### OPENAI API SERVER ####################

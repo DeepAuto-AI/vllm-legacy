@@ -166,6 +166,7 @@ class Worker(WorkerBase):
             "not properly cleaned up before initializing the vLLM instance.")
         if os.getenv('MEASURE_PEAK_MEMORY', '1') == '0':
             peak_memory = 0
+        print(f"Peak memory: {peak_memory / 1024**2:.2f} MB")
 
         cache_block_size = self.get_cache_block_size_bytes()
         num_gpu_blocks = int(

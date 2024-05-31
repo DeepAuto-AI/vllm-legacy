@@ -21,6 +21,7 @@ _CONFIG_REGISTRY: Dict[str, PretrainedConfig] = {
 
 logger = init_logger(__name__)
 
+
 def get_config(model: str,
                trust_remote_code: bool,
                revision: Optional[str] = None,
@@ -43,6 +44,7 @@ def get_config(model: str,
             raise RuntimeError(err_msg) from e
         else:
             raise e
+    
     if config.model_type in _CONFIG_REGISTRY:
         config_class = _CONFIG_REGISTRY[config.model_type]
         config = config_class.from_pretrained(model,

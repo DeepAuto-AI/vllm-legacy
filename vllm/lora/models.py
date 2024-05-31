@@ -218,7 +218,13 @@ class LoRAModel:
         pin_memory = str(device) == "cpu" and is_pin_memory_available()
         loras: Dict[str, LoRALayerWeights] = {}
         for tensor_name, tensor in tensors.items():
+            if ("tree_avgpool_scaler" in tensor_name
+                    or "vision_tower" in tensor_name
+                    or "vision_proj" in tensor_name):
+                continue
             module_name, is_lora_a = parse_fine_tuned_lora_name(tensor_name)
+            if module_name.startswith('model.model.'):
+                module_name = module_name[len('model.'):]
             if module_name not in loras:
                 lora_embeddings_tensor = None
                 if embeddings:

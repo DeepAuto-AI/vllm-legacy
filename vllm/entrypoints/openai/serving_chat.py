@@ -27,6 +27,8 @@ from vllm.outputs import RequestOutput
 from vllm.sequence import Logprob
 from vllm.utils import random_uuid
 
+from .make_prompt import make_prompt
+
 logger = init_logger(__name__)
 
 
@@ -137,6 +139,7 @@ class OpenAIServingChat(OpenAIServing):
         NOTE: Currently we do not support the following feature:
             - function_call (Users should implement this by themselves)
         """
+        #request.model = self.served_model
         error_check_ret = await self._check_model(request)
         if error_check_ret is not None:
             return error_check_ret
@@ -159,6 +162,7 @@ class OpenAIServingChat(OpenAIServing):
             return self.create_error_response(str(e))
 
         request_id = f"cmpl-{random_uuid()}"
+        token_ids = None
         try:
             # Tokenize/detokenize depending on prompt format (string/token list)
             prompt_ids, prompt_text = self._validate_prompt_and_tokenize(

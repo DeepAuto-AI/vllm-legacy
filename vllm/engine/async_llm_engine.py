@@ -4,6 +4,7 @@ from functools import partial
 from typing import (AsyncIterator, Callable, Dict, Iterable, List, Optional,
                     Set, Tuple, Type, Union)
 
+import torch
 from transformers import PreTrainedTokenizer
 
 import vllm.envs as envs
