@@ -141,11 +141,15 @@ class Phi3HDImageEmbedding(Phi3ImageEmbeddingBase):
         self.layer_idx = config.img_processor.get('layer_idx', -2)
         self.type_feature = config.img_processor.get('type_feature', 'patch')
 
-    def forward(self,
-                input_ids: torch.LongTensor,
-                pixel_values: torch.FloatTensor,
-                image_sizes=None) -> torch.FloatTensor:
-
+    def forward(
+        self,
+        input_ids: torch.LongTensor,
+        pixel_values: torch.FloatTensor,
+        image_sizes=None
+    ) -> torch.FloatTensor:
+        
+        print('asdf', pixel_values.shape)
+        
         MAX_INPUT_ID = int(1e9)
         img_embeds = pixel_values
         img_sizes = image_sizes
@@ -157,6 +161,9 @@ class Phi3HDImageEmbedding(Phi3ImageEmbeddingBase):
         if self.img_sizes is not None:
             img_sizes = self.img_sizes
 
+        if input_ids.ndim == 1:
+            input_ids = input_ids.unsqueeze(0)
+        
         input_shape = input_ids.size()
         input_ids = input_ids.view(-1, input_shape[-1])
 
@@ -164,13 +171,15 @@ class Phi3HDImageEmbedding(Phi3ImageEmbeddingBase):
             (input_ids < 0) & (input_ids > -MAX_INPUT_ID), 
             as_tuple=False
         )
+        
+        print('paosdif', positions.shape, input_shape)
 
         select = False
 
         target_device = self.img_projection[0].bias.device
         target_dtype = self.img_projection[0].bias.dtype
 
-        if len(positions.tolist()) > 0:
+        if len(positions.tolist()) > 0: #TODO: remove this tolist()
             # if self.use_hd_transform and img_sizes:
             # img_embeds: (num_images, max_num_crops, 3, H, W)
             # img_sizes: (num_images, 2).view(1, -1)
@@ -179,6 +188,7 @@ class Phi3HDImageEmbedding(Phi3ImageEmbeddingBase):
             print(img_embeds.shape)
             # Nx(HW)xC
             img_features = self.get_img_features(img_embeds.flatten(0, 1))
+            print('imgf', img_features.shape, img_embeds.flatten(0, 1).shape, img_sizes)
             base_feat_height = base_feat_width = int(
                 img_features.shape[1]**0.5)
 
@@ -241,8 +251,9 @@ class Phi3HDImageEmbedding(Phi3ImageEmbeddingBase):
             num_img_tokens = output_len
             img_set_tensor = []
             for _output_img in output_imgs:
-                img_feature_proj = self.img_projection(
-                    _output_img.to(target_device, target_dtype))
+                _t = _output_img.to(target_device, target_dtype)
+                img_feature_proj = self.img_projection(_t)
+                print('imgproj', _t.shape, img_feature_proj.shape)
                 img_set_tensor.append(img_feature_proj)
             select = True
 
@@ -250,13 +261,18 @@ class Phi3HDImageEmbedding(Phi3ImageEmbeddingBase):
 
         hidden_states = self.wte(input_ids)
 
-        print(hidden_states.shape, len(num_img_tokens))
+        print('hidden', input_ids.shape, hidden_states.shape, len(num_img_tokens))
 
         if select:
             idx = 0
             for i, cnt in enumerate(num_img_tokens):
-                print(positions.shape, positions)
-                print(cnt, img_set_tensor[i].shape)
+                print('positionsfd', positions.shape)
+                print('cnt,t', cnt, img_set_tensor[i].shape)
+                
+                assert idx < positions.shape[0], f'{idx} < {positions.shape[0]}'
+                assert hidden_states.shape[1] >= positions[idx, 1] + cnt, f'{hidden_states.shape[1]} >= {positions[idx, 1]} + {cnt}'
+                
+                print('poss', positions[idx, 0], positions[idx, 1], positions[idx, 1] + cnt)
                 
                 hidden_states[
                     positions[idx, 0],

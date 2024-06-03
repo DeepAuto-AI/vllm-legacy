@@ -22,10 +22,11 @@ def run_phi3v():
         image_input_shape="1008, 1344",
         fake_image_input_shape="1, 16, 3, 336, 336",
         image_feature_size=1024,
-        max_model_len=32000,
+        max_model_len=128000,
+        max_num_seqs=4,
         kv_cache_dtype="fp8_e5m2",
         dtype='half',
-        tensor_parallel_size=2,
+        tensor_parallel_size=1,
     )
 
     image = Image.open("images/stop_sign.jpg")
@@ -39,10 +40,17 @@ def run_phi3v():
     inputs = processor(prompt, image, return_tensors="pt")
     multi_modal_data = MultiModalData(type=MultiModalData.Type.IMAGE,
                                       data=inputs["pixel_values"])
-    sampling_params = SamplingParams(temperature=0, max_tokens=64)
-    outputs = llm.generate(prompt_token_ids=inputs["input_ids"].tolist(),
-                           sampling_params=sampling_params,
-                           multi_modal_data=multi_modal_data)
+    sampling_params = SamplingParams(
+        temperature=0.7, 
+        top_p=0.9,
+        top_k=32,
+        max_tokens=512
+    )
+    outputs = llm.generate(
+        prompt_token_ids=inputs["input_ids"].tolist(),
+        sampling_params=sampling_params,
+        multi_modal_data=multi_modal_data
+    )
     for o in outputs:
         generated_text = o.outputs[0].text
         print(generated_text)

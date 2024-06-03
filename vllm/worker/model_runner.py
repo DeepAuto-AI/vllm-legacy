@@ -550,9 +550,11 @@ class ModelRunner:
         if multi_modal_input_list:
             assert self.vision_language_config, (
                 "Multi-modal inputs are only supported by "
-                "vision language models.")
-            multi_modal_input = torch.cat(multi_modal_input_list,
-                                          dim=0).to(self.device)
+                "vision language models."
+            )
+            multi_modal_input = torch.cat(
+                multi_modal_input_list, dim=0
+            ).to(self.device)
         else:
             multi_modal_input = None
 
@@ -824,6 +826,7 @@ class ModelRunner:
         }
         if self.vision_language_config:
             execute_model_kwargs.update({"image_input": multi_modal_input})
+        print('input', input_tokens.shape)
         hidden_states = model_executable(**execute_model_kwargs)
 
         # Compute the logits.
