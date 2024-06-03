@@ -1390,7 +1390,9 @@ def _get_graph_batch_size(batch_size: int) -> int:
 
 
 def _prepare_fake_inputs(
-        seq_len: int, vision_language_config: Optional[VisionLanguageConfig]):
+    seq_len: int, 
+    vision_language_config: Optional[VisionLanguageConfig]
+):
     """Prepare fake inputs for profile run."""
     if vision_language_config:
         prompt_tokens = [
@@ -1399,8 +1401,13 @@ def _prepare_fake_inputs(
             seq_len - vision_language_config.image_feature_size)
         fake_image_input = MultiModalData(
             type=MultiModalData.Type.IMAGE,
-            data=torch.zeros(vision_language_config.image_input_shape,
-                             dtype=torch.float16))
+            data=torch.zeros(
+                vision_language_config.image_input_shape 
+                if vision_language_config.fake_image_input_shape is None else 
+                vision_language_config.fake_image_input_shape,
+                dtype=torch.float16
+            )
+        )
     else:
         prompt_tokens = [0] * seq_len
         fake_image_input = None

@@ -1089,6 +1089,7 @@ class VisionLanguageConfig:
     # For models that support varying resolution, this corresponds to
     # worst case scenario (biggest supported resolution).
     image_input_shape: tuple
+    fake_image_input_shape: Optional[tuple]
     image_feature_size: int
 
     @classmethod

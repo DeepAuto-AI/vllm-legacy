@@ -71,8 +71,12 @@ class Phi3ImageEmbeddingBase(nn.Module):
         LAYER_IDX = self.layer_idx
         TYPE_FEATURE = self.type_feature
 
-        img_processor_output = self.img_processor(img_embeds,
-                                                  output_hidden_states=True)
+        print(img_embeds.shape)
+
+        img_processor_output = self.img_processor(
+            img_embeds,
+            output_hidden_states=True
+        )
         img_feature = img_processor_output.hidden_states[LAYER_IDX]
 
         if TYPE_FEATURE == "patch":
@@ -157,7 +161,9 @@ class Phi3HDImageEmbedding(Phi3ImageEmbeddingBase):
         input_ids = input_ids.view(-1, input_shape[-1])
 
         positions = torch.nonzero(
-            (input_ids < 0) & (input_ids > -MAX_INPUT_ID), as_tuple=False)
+            (input_ids < 0) & (input_ids > -MAX_INPUT_ID), 
+            as_tuple=False
+        )
 
         select = False
 
@@ -170,6 +176,7 @@ class Phi3HDImageEmbedding(Phi3ImageEmbeddingBase):
             # img_sizes: (num_images, 2).view(1, -1)
 
             bs = img_embeds.shape[0]
+            print(img_embeds.shape)
             # Nx(HW)xC
             img_features = self.get_img_features(img_embeds.flatten(0, 1))
             base_feat_height = base_feat_width = int(
@@ -243,13 +250,21 @@ class Phi3HDImageEmbedding(Phi3ImageEmbeddingBase):
 
         hidden_states = self.wte(input_ids)
 
+        print(hidden_states.shape, len(num_img_tokens))
+
         if select:
             idx = 0
             for i, cnt in enumerate(num_img_tokens):
-                hidden_states[positions[idx, 0],
-                              positions[idx, 1]:positions[idx, 1] +
-                              cnt] = (img_set_tensor[i].to(
-                                  hidden_states.device, hidden_states.dtype))
+                print(positions.shape, positions)
+                print(cnt, img_set_tensor[i].shape)
+                
+                hidden_states[
+                    positions[idx, 0],
+                    positions[idx, 1]:positions[idx, 1] + cnt
+                ] = (
+                    img_set_tensor[i]\
+                        .to(hidden_states.device, hidden_states.dtype)
+                )
                 idx += cnt
 
         return hidden_states.squeeze(0)
@@ -286,7 +301,8 @@ class Phi3VForCausalLM(VisionLanguageModelBase):
         if image_input is not None:
             inputs_embeds = self.vision_embed_tokens(
                 input_ids, image_input,
-                self.vision_language_config.image_input_shape)
+                self.vision_language_config.image_input_shape
+            )
 
             input_ids = None
         else:

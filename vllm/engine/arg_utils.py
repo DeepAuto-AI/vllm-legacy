@@ -79,6 +79,7 @@ class EngineArgs:
     image_input_type: Optional[str] = None
     image_token_id: Optional[int] = None
     image_input_shape: Optional[str] = None
+    fake_image_input_shape: Optional[str] = None
     image_feature_size: Optional[int] = None
     scheduler_delay_factor: float = 0.0
     enable_chunked_prefill: bool = False
@@ -639,6 +640,7 @@ class EngineArgs:
                 get_image_input_enum_type(self.image_input_type),
                 image_token_id=self.image_token_id,
                 image_input_shape=str_to_int_tuple(self.image_input_shape),
+                fake_image_input_shape=str_to_int_tuple(self.fake_image_input_shape) if self.fake_image_input_shape is not None else None,
                 image_feature_size=self.image_feature_size,
             )
         else:

@@ -10,15 +10,22 @@ from vllm.sequence import MultiModalData
 
 def run_phi3v():
     model_path = "microsoft/Phi-3-vision-128k-instruct"
-    processor = AutoProcessor.from_pretrained(model_path,
-                                              trust_remote_code=True)
+    processor = AutoProcessor.from_pretrained(
+        model_path,
+        trust_remote_code=True
+    )
     llm = LLM(
         model=model_path,
         trust_remote_code=True,
         image_input_type="pixel_values",
         image_token_id=-1,
         image_input_shape="1008, 1344",
+        fake_image_input_shape="1, 16, 3, 336, 336",
         image_feature_size=1024,
+        max_model_len=32000,
+        kv_cache_dtype="fp8_e5m2",
+        dtype='half',
+        tensor_parallel_size=2,
     )
 
     image = Image.open("images/stop_sign.jpg")
