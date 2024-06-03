@@ -1,7 +1,8 @@
 # Adapted from
 # https://github.com/lm-sys/FastChat/blob/168ccc29d3f7edc50823016105c024fe2282732a/fastchat/protocol/openai_api_protocol.py
 import time
-from typing import Dict, List, Literal, Optional, Union
+from typing import Dict, List, Optional, Union
+from typing_extensions import Literal, Required, TypedDict
 
 from pydantic import BaseModel, Field, model_validator
 
@@ -55,9 +56,39 @@ class UsageInfo(BaseModel):
     completion_tokens: Optional[int] = 0
 
 
+class ImageURL(TypedDict, total=False):
+    url: Required[str]
+    """Either a URL of the image or the base64 encoded image data."""
+
+    detail: Literal["auto", "low", "high"]
+    """Specifies the detail level of the image.
+
+    Learn more in the
+    [Vision guide](https://platform.openai.com/docs/guides/vision/low-or-high-fidelity-image-understanding).
+    """
+
+
+class ChatCompletionContentPartImageParam(TypedDict, total=False):
+    image_url: Required[ImageURL]
+
+    type: Required[Literal["image_url"]]
+    """The type of the content part."""
+
+
+class ChatCompletionContentPartTextParam(TypedDict, total=False):
+    text: Required[str]
+    """The text content."""
+
+    type: Required[Literal["text"]]
+    """The type of the content part."""
+
+
+ChatCompletionContentPartParam = Union[ChatCompletionContentPartTextParam, ChatCompletionContentPartImageParam]
+
+
 class ChatCompletionRequest(BaseModel):
     model: str
-    messages: List[Dict[str, str]]
+    messages: List[Dict[str, Union[str , List[ChatCompletionContentPartParam]]]]
     temperature: Optional[float] = 0.7
     top_p: Optional[float] = 1.0
     n: Optional[int] = 1
