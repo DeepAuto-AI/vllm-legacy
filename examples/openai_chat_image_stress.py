@@ -6,9 +6,11 @@ import base64
 import logging
 import os
 from pathlib import Path
+import random
 import subprocess
 import threading
 
+import time
 from typing import Tuple
 import typer
 from openai import OpenAI
@@ -303,12 +305,15 @@ def thread_main(
     image_file,
     model,
     endpoint,
-    token, 
+    token,
+    num_seqs,
     thread_id,
     result_queue,
 ):
     while True:
         # Getting the base64 string
+        time.sleep(random.random() * 5)
+        
         base64_image = _encode_image(image_file)
 
         client = OpenAI(
@@ -359,7 +364,7 @@ def thread_main(
             ],
             temperature=0.7,
             top_p=0.9,
-            n=32,
+            n=num_seqs,
             max_tokens=512,
         )
         
@@ -371,6 +376,7 @@ def chat(
     model: Annotated[str, typer.Option(help="Model to use.")],
     endpoint: Annotated[str, typer.Option(help="API endpoint.")],
     token: Annotated[str, typer.Option(help="API token.")],
+    num_seqs: Annotated[str, typer.Option(help="Num concurrent seq for each request")],
     num_workers: Annotated[int, typer.Option(help="num workers")],
 ):
     result_queue = queue.Queue()
@@ -381,7 +387,8 @@ def chat(
             image_file,
             model,
             endpoint,
-            token, 
+            token,
+            num_seqs,
             i,
             result_queue,
         ), daemon=True)
@@ -393,7 +400,7 @@ def chat(
     processed_requests = 0
     
     while True:
-        thread_id, response = result_queue.get() #type: Tuple[int, ChatCompletion]
+        response = result_queue.get()[1] #type: ChatCompletion
         processed_response_tokens += response.usage.completion_tokens
         processed_prompt_tokens += response.usage.prompt_tokens
         processed_requests += 1

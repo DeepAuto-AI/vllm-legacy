@@ -302,6 +302,7 @@ def chat(
     model: Annotated[str, typer.Option(help="Model to use.")],
     endpoint: Annotated[str, typer.Option(help="API endpoint.")],
     token: Annotated[str, typer.Option(help="API token.")],
+    max_tokens: Annotated[int, typer.Option(help="num token to generate")],
 ):
     # Getting the base64 string
     base64_image = _encode_image(image_file)
@@ -345,7 +346,7 @@ def chat(
         temperature=0.7,
         top_p=0.9,
         n=8,
-        max_tokens=16,
+        max_tokens=max_tokens,
     )
     
     print(response)

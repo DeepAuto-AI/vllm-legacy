@@ -1,4 +1,5 @@
 import os
+import random
 import time
 import warnings
 from typing import Dict, List, NamedTuple, Optional, Set, Tuple, Union
@@ -886,9 +887,32 @@ class ModelRunner:
         if BENCHMARK_RUNNER: 
             t_sample = time.time()
             start_sample.record()
+        
         if DISABLE_SAMPLING:
             from vllm.sequence import SamplerOutput, CompletionSequenceGroupOutput, SequenceOutput, Logprob
-            next_token_index = torch.argmax(logits, dim=-1).cpu().tolist()
+            sampling_k = 32
+            sampling_p = 0.9
+            sampling_temperature = 0.7
+            
+            probs = (logits / sampling_temperature).softmax(dim=-1)
+            topk_probs, topk_indices = torch.topk(probs, k=sampling_k, dim=-1)
+            topk_probs = topk_probs.cpu()
+            topk_indices = topk_indices.cpu()
+            
+            topk_cum_probs = topk_probs.cumsum(dim=-1)
+            topk_cum_probs[:, 0] = 0
+            topk_p_mask = topk_cum_probs <= sampling_p
+            
+            topk_indices = topk_indices * topk_p_mask
+            topk_probs = topk_probs * topk_p_mask
+            topk_probs = topk_probs / topk_probs.sum(dim=-1, keepdim=True)
+            
+            next_token_index = []
+            for i in range(topk_probs.shape[0]):
+                next_token_index.append(
+                    random.sample(topk_indices[i].tolist(), k=1, counts=(topk_probs[i] * 10000).int().tolist())[0]
+                )
+            
             idx_seq = 0
             sample_outputs = []
             for i, seq in enumerate(seq_group_metadata_list):
@@ -909,6 +933,7 @@ class ModelRunner:
                         )
                     idx_seq += 1
                 sample_outputs.append(CompletionSequenceGroupOutput(seq_outputs, None))
+            
             output = SamplerOutput(
                 sample_outputs,
                 None,
@@ -921,6 +946,7 @@ class ModelRunner:
                 logits=logits,
                 sampling_metadata=sampling_metadata,
             )
+        
         # print(output)
         if BENCHMARK_RUNNER: 
             t_sample = time.time() - t_sample
@@ -937,7 +963,7 @@ class ModelRunner:
                 # in main process
                 n_tokens = input_tokens.shape[0]
                 elapsed_model_per_token = elapsed_model / n_tokens
-                print(t_sample, logits.device, logits.shape)
+                # print(t_sample, logits.device, logits.shape)
                 print(f'[{time.time() * 1000:.3f}][{type(model_executable)}, {len(seq_group_metadata_list) if seq_group_metadata_list is not None else None}, {n_tokens}](is_prompt: {is_prompt}) prepare: {elapsed_prepare:.3f}, model: {elapsed_model:.3f}({self.metrics[is_prompt]["model"].update(elapsed_model):.3f}), model_per_token: {elapsed_model_per_token:.3f}({self.metrics[is_prompt]["model_per_token"].update(elapsed_model_per_token):.3f}) sample: {elapsed_sample:.3f}, total: {elapsed_total:.3f}')
         
         return output
