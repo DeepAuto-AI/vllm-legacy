@@ -462,6 +462,12 @@ class EngineArgs:
             help=('The biggest image input shape (worst for memory footprint) '
                   'given an input type. Only used for vLLM\'s profile_run.'))
         parser.add_argument(
+            '--fake-image-input-shape',
+            type=nullable_str,
+            default=None,
+            help=('The biggest image input tensor shape (worst for memory footprint) '
+                  'given an input type. Only used for vLLM\'s profile_run.'))
+        parser.add_argument(
             '--image-feature-size',
             type=int,
             default=None,

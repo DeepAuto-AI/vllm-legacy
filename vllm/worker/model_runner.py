@@ -123,7 +123,7 @@ class ModelRunner:
         self.sliding_window = model_config.get_sliding_window()
         self.block_size = cache_config.block_size
         self.max_seq_len_to_capture = self.model_config.max_seq_len_to_capture
-        self.graph_runners: Dict[int, CUDAGraphRunner] = {}
+        self.graph_runners: Dict[int, Union[CUDAGraphRunner, "HipGraphRunnerCounter"]] = {}
         self.graph_memory_pool: Optional[Tuple[
             int, int]] = None  # Set during graph capture.
         # When using CUDA graph, the input block tables must be padded to
@@ -161,9 +161,11 @@ class ModelRunner:
         self.metrics = {
             True: { # is prompt
                 'model': MetricTracer(),
+                'model_per_token': MetricTracer(),
             },
             False: { # is decoding
                 'model': MetricTracer(n_warmup=16),
+                'model_per_token': MetricTracer(n_warmup=16),
             }
         }
 
@@ -510,6 +512,16 @@ class ModelRunner:
             decode_only and not self.model_config.enforce_eager
             and batch_size <= _BATCH_SIZES_TO_CAPTURE[-1]
             and max_decode_seq_len <= self.max_seq_len_to_capture)
+        # print(
+        #     'sadf', 
+        #     use_captured_graph, 
+        #     decode_only, 
+        #     self.model_config.enforce_eager, 
+        #     batch_size, 
+        #     _BATCH_SIZES_TO_CAPTURE[-1], 
+        #     max_decode_seq_len, 
+        #     self.max_seq_len_to_capture
+        # )
         if use_captured_graph:
             graph_batch_size = _get_graph_batch_size(batch_size)
             assert graph_batch_size >= batch_size
@@ -825,6 +837,11 @@ class ModelRunner:
                 else:
                     raise Exception()
         
+        if not is_prompt:
+            if not (prefill_meta is None and decode_meta.use_cuda_graph):
+                warnings.warn("CUDA graph is suggested for decoding")
+        # print(prefill_meta is None, decode_meta.use_cuda_graph if decode_meta is not None else None)
+        
         execute_model_kwargs = {
             "input_ids": input_tokens,
             "positions": input_positions,
@@ -877,7 +894,9 @@ class ModelRunner:
             
             if seq_group_metadata_list is not None:
                 # in main process
-                print(f'[{time.time() * 1000:.3f}][{len(seq_group_metadata_list) if seq_group_metadata_list is not None else None}](is_prompt: {is_prompt}) prepare: {elapsed_prepare:.3f}, model: {elapsed_model:.3f}({self.metrics[is_prompt]["model"].update(elapsed_model):.3f}), sample: {elapsed_sample:.3f}, total: {elapsed_total:.3f}')
+                n_tokens = input_tokens.shape[0]
+                elapsed_model_per_token = elapsed_model / n_tokens
+                print(f'[{time.time() * 1000:.3f}][{type(model_executable)}, {len(seq_group_metadata_list) if seq_group_metadata_list is not None else None}, {n_tokens}](is_prompt: {is_prompt}) prepare: {elapsed_prepare:.3f}, model: {elapsed_model:.3f}({self.metrics[is_prompt]["model"].update(elapsed_model):.3f}), model_per_token: {elapsed_model_per_token:.3f}({self.metrics[is_prompt]["model_per_token"].update(elapsed_model_per_token):.3f}) sample: {elapsed_sample:.3f}, total: {elapsed_total:.3f}')
         
         return output
 

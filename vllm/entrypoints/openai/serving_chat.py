@@ -1,13 +1,15 @@
+import base64
 import codecs
 import time
 from dataclasses import dataclass
+import traceback
 from typing import (AsyncGenerator, AsyncIterator, Dict, Iterable, List,
                     Optional)
 from typing import Sequence as GenericSequence
 from typing import TypedDict, Union, cast, final
 
 from fastapi import Request
-from openai.types.chat import ChatCompletionContentPartTextParam
+from openai.types.chat import ChatCompletionContentPartTextParam, ChatCompletionContentPartImageParam
 
 from vllm.config import ModelConfig
 from vllm.engine.async_llm_engine import AsyncLLMEngine
@@ -24,8 +26,11 @@ from vllm.logger import init_logger
 from vllm.model_executor.guided_decoding import (
     get_guided_decoding_logits_processor)
 from vllm.outputs import RequestOutput
-from vllm.sequence import Logprob
+from vllm.sequence import Logprob, MultiModalData
 from vllm.utils import random_uuid
+from PIL import Image
+import re
+import io
 
 from .make_prompt import make_prompt
 
@@ -41,6 +46,7 @@ class ConversationMessage(TypedDict):
 @dataclass(frozen=True)
 class ChatMessageParseResult:
     messages: List[ConversationMessage]
+    is_multimodal: bool = False
 
 
 class OpenAIServingChat(OpenAIServing):
@@ -95,6 +101,8 @@ class OpenAIServingChat(OpenAIServing):
         parts: Iterable[ChatCompletionContentPartParam],
     ) -> ChatMessageParseResult:
         texts: List[str] = []
+        
+        is_multimodal = False
 
         for _, part in enumerate(parts):
             part_type = part["type"]
@@ -102,12 +110,31 @@ class OpenAIServingChat(OpenAIServing):
                 text = cast(ChatCompletionContentPartTextParam, part)["text"]
 
                 texts.append(text)
+            elif part_type == 'image_url':
+                is_multimodal = True
+                
+                image_url = cast(ChatCompletionContentPartImageParam, part)["image_url"]['url']
+                image_data = re.sub('^data:image/.+;base64,', '', image_url)
+                if len(image_data) > 0:
+                    image_data = base64.b64decode(image_data)
+                    # print(len(image_data))
+                    image = Image.open(io.BytesIO(image_data))
+                else:
+                    image = Image.open(image_url)
+                
+                texts.append(image)
             else:
                 raise NotImplementedError(f"Unknown part type: {part_type}")
 
-        messages = [ConversationMessage(role=role, content="\n".join(texts))]
+        if is_multimodal:
+            messages = [ConversationMessage(role=role, content=texts)]
+        else:
+            messages = [ConversationMessage(role=role, content="\n".join(texts))]
 
-        return ChatMessageParseResult(messages=messages)
+        return ChatMessageParseResult(
+            messages=messages, 
+            is_multimodal=is_multimodal
+        )
 
     def _parse_chat_message_content(
         self,
@@ -144,50 +171,95 @@ class OpenAIServingChat(OpenAIServing):
         if error_check_ret is not None:
             return error_check_ret
 
+        is_multimodal = False
+        image_index = 1
+        images = []
         try:
             conversation: List[ConversationMessage] = []
 
             for msg in request.messages:
                 parsed_msg = self._parse_chat_message_content(msg)
-
+                is_multimodal = is_multimodal or parsed_msg.is_multimodal
                 conversation.extend(parsed_msg.messages)
+            
+            if is_multimodal:
+                # convert conversation texts: List[str] to texts: str
+                for message in conversation:
+                    if isinstance(message['content'], (list, tuple)):
+                        for idx_message in range(len(message['content'])):
+                            if isinstance(message['content'][idx_message], Image.Image):
+                                image = message['content'][idx_message] # type: Image.Image
+                                images.append(image)
+                                message['content'][idx_message] = \
+                                    f'[System]: User just provided their image.\n'\
+                                    f'[System]: I will provide the image medatadata here. Image size (width, height in pixels): ({image.size[0]}, {image.size[1]})'\
+                                    f'[System]: Here is user provided image:\n[Image starts]\n<|image_{image_index}|>\n[Image ends]'
+                                image_index += 1
+                        
+                        for line in message['content']:
+                            assert isinstance(line, str), "every line should be string"
 
+                        message['content'] = '\n'.join(message['content'])
+                    elif isinstance(message['content'], str): pass
+                    else:
+                        raise Exception(f'unknown message content type {type(message["content"])}')
+                    
+                    assert isinstance(message['content'], str), 'every content before chat template should be string'
+            
             prompt = self.tokenizer.apply_chat_template(
                 conversation=conversation,
                 tokenize=False,
                 add_generation_prompt=request.add_generation_prompt,
             )
         except Exception as e:
+            traceback.print_exc()
             logger.error("Error in applying chat template from request: %s", e)
             return self.create_error_response(str(e))
 
         request_id = f"cmpl-{random_uuid()}"
-        token_ids = None
+        prompt_text = prompt_ids = None
+        multi_modal_data = None
         try:
             # Tokenize/detokenize depending on prompt format (string/token list)
             prompt_ids, prompt_text = self._validate_prompt_and_tokenize(
-                request, prompt=prompt, add_special_tokens=False)
+                request, 
+                prompt=prompt, 
+                add_special_tokens=False,
+            )
+            if is_multimodal:
+                processed_inputs = self.multimodal_processor(prompt, images, return_tensors="pt")
+                multi_modal_data = MultiModalData(
+                    type=MultiModalData.Type.IMAGE,
+                    data=processed_inputs['pixel_values'], 
+                )
+                assert len(processed_inputs['input_ids']) == 1, 'multimodal does not support multi batch request'
+                prompt_ids = processed_inputs['input_ids'][0].tolist()
+            
             sampling_params = request.to_sampling_params()
             lora_request = self._maybe_get_lora(request)
             decoding_config = await self.engine.get_decoding_config()
-            guided_decoding_backend = request.guided_decoding_backend \
-                or decoding_config.guided_decoding_backend
+            guided_decoding_backend = \
+                request.guided_decoding_backend or\
+                decoding_config.guided_decoding_backend
             guided_decode_logits_processor = (
                 await get_guided_decoding_logits_processor(
                     guided_decoding_backend, request, await
-                    self.engine.get_tokenizer()))
+                    self.engine.get_tokenizer())
+                )
             if guided_decode_logits_processor:
                 if sampling_params.logits_processors is None:
                     sampling_params.logits_processors = []
                 sampling_params.logits_processors.append(
-                    guided_decode_logits_processor)
+                    guided_decode_logits_processor
+                )
         except ValueError as e:
             return self.create_error_response(str(e))
 
         result_generator = self.engine.generate(
             {
                 "prompt": prompt_text,
-                "prompt_token_ids": prompt_ids
+                "prompt_token_ids": prompt_ids,
+                "multi_modal_data": multi_modal_data,
             },
             sampling_params,
             request_id,
@@ -196,12 +268,14 @@ class OpenAIServingChat(OpenAIServing):
         # Streaming response
         if request.stream:
             return self.chat_completion_stream_generator(
-                request, result_generator, request_id, conversation)
+                request, result_generator, request_id, conversation
+            )
         else:
             try:
                 return await self.chat_completion_full_generator(
                     request, raw_request, result_generator, request_id,
-                    conversation)
+                    conversation
+                )
             except ValueError as e:
                 # TODO: Use a vllm-specific Validation Error
                 return self.create_error_response(str(e))

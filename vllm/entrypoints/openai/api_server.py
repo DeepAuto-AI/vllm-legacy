@@ -210,12 +210,14 @@ if __name__ == "__main__":
     openai_serving_embedding = OpenAIServingEmbedding(engine, model_config,
                                                       served_model_names)
     app.root_path = args.root_path
-    uvicorn.run(app,
-                host=args.host,
-                port=args.port,
-                log_level=args.uvicorn_log_level,
-                timeout_keep_alive=TIMEOUT_KEEP_ALIVE,
-                ssl_keyfile=args.ssl_keyfile,
-                ssl_certfile=args.ssl_certfile,
-                ssl_ca_certs=args.ssl_ca_certs,
-                ssl_cert_reqs=args.ssl_cert_reqs)
+    uvicorn.run(
+        app,
+        host=args.host,
+        port=args.port,
+        log_level=args.uvicorn_log_level,
+        timeout_keep_alive=TIMEOUT_KEEP_ALIVE,
+        ssl_keyfile=args.ssl_keyfile,
+        ssl_certfile=args.ssl_certfile,
+        ssl_ca_certs=args.ssl_ca_certs,
+        ssl_cert_reqs=args.ssl_cert_reqs,
+    )

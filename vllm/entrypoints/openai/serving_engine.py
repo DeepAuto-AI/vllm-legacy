@@ -17,6 +17,7 @@ from vllm.logger import init_logger
 from vllm.lora.request import LoRARequest
 from vllm.sequence import Logprob
 from vllm.transformers_utils.tokenizer import get_tokenizer
+from transformers import AutoProcessor
 
 logger = init_logger(__name__)
 
@@ -29,9 +30,13 @@ class LoRAModulePath:
 
 class OpenAIServing:
 
-    def __init__(self, engine: AsyncLLMEngine, model_config: ModelConfig,
-                 served_model_names: List[str],
-                 lora_modules: Optional[List[LoRAModulePath]]):
+    def __init__(
+        self, 
+        engine: AsyncLLMEngine, 
+        model_config: ModelConfig,
+        served_model_names: List[str],
+        lora_modules: Optional[List[LoRAModulePath]]
+    ):
         super().__init__()
 
         self.engine = engine
@@ -43,7 +48,16 @@ class OpenAIServing:
             tokenizer_mode=model_config.tokenizer_mode,
             tokenizer_revision=model_config.tokenizer_revision,
             trust_remote_code=model_config.trust_remote_code,
-            truncation_side="left")
+            truncation_side="left"
+        )
+        
+        if engine.engine.vision_language_config is not None:
+            self.multimodal_processor = AutoProcessor.from_pretrained(
+                model_config.tokenizer,
+                trust_remote_code=True,
+            )
+        else:
+            self.multimodal_processor = None
 
         self.served_model_names = served_model_names
 
@@ -123,14 +137,17 @@ class OpenAIServing:
         raise ValueError(f"The model `{request.model}` does not exist.")
 
     def _validate_prompt_and_tokenize(
-            self,
-            request: Union[ChatCompletionRequest, CompletionRequest,
-                           EmbeddingRequest],
-            prompt: Optional[str] = None,
-            prompt_ids: Optional[List[int]] = None,
-            truncate_prompt_tokens: Optional[Annotated[int,
-                                                       Field(ge=1)]] = None,
-            add_special_tokens: bool = True) -> Tuple[List[int], str]:
+        self,
+        request: Union[
+            ChatCompletionRequest, 
+            CompletionRequest,
+            EmbeddingRequest
+        ],
+        prompt: Optional[str] = None,
+        prompt_ids: Optional[List[int]] = None,
+        truncate_prompt_tokens: Optional[Annotated[int,Field(ge=1)]] = None,
+        add_special_tokens: bool = True
+    ) -> Tuple[List[int], str]:
         if not (prompt or prompt_ids):
             raise ValueError("Either prompt or prompt_ids should be provided.")
         if (prompt and prompt_ids):
