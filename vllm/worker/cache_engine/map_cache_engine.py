@@ -6,7 +6,9 @@ import torch
 import numpy as np
 import cupy as cp
 from typing import List, Tuple
-from .cache_engine import CacheConfig, CacheEngine, KVCache, init_logger, ModelConfig, ParallelConfig, STR_DTYPE_TO_TORCH_DTYPE, _get_dtype_size
+from .cache_engine import CacheConfig, CacheEngine, init_logger, ModelConfig, ParallelConfig, STR_DTYPE_TO_TORCH_DTYPE, _get_dtype_size
+
+KVCache = torch.Tensor
 
 logger = init_logger(__name__)
 
@@ -215,7 +217,7 @@ class ManagedTensor:
         # print('asdfsadfsafd', flush=True)
         # torch.cuda.current_stream(self.target_device).wait_stream(self.stream)
         
-        print(f'prefetch: commited: {commited}, calls: {prefetch_calls}, took: {(time.time() - t) * 1000:.3f}, elapsed_scan: {elapsed_scan:.3f}, elapsed_call: {elapsed_call:.3f}')
+        print(f'prefetch: commited: {commited:,}, calls: {prefetch_calls}, took: {(time.time() - t) * 1000:.3f}, elapsed_scan: {elapsed_scan:.3f}, elapsed_call: {elapsed_call:.3f}')
 
     def prompt_start(self, block_indices):
         # return # disable prefetch
