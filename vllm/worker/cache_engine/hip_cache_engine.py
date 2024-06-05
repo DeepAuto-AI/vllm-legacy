@@ -1,11 +1,12 @@
 from typing import List, Tuple
 from torch import Tensor
 import torch
-from vllm.worker.cache_engine.cache_engine import KVCache
 
 from .cache_engine import CacheEngine, init_logger, ModelConfig
 
 logger = init_logger(__name__)
+
+KVCache = Tensor
 
 class HipCache:
     pass
