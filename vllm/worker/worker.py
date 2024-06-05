@@ -273,8 +273,10 @@ class Worker(WorkerBase):
         if num_seq_groups == 0:
             return []
 
-        output = self.model_runner.execute_model(seq_group_metadata_list,
-                                                 self.gpu_cache)
+        output = self.model_runner.execute_model(
+            seq_group_metadata_list,
+            self.gpu_cache
+        )
 
         # Worker only supports single-step execution. Wrap the output in a list
         # to conform to interface.

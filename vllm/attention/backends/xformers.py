@@ -273,7 +273,7 @@ class XFormersImpl(AttentionImpl[XFormersMetadata]):
 
         num_prefill_tokens = attn_metadata.num_prefill_tokens
         num_decode_tokens = attn_metadata.num_decode_tokens
-        assert key.shape[0] == num_prefill_tokens + num_decode_tokens
+        assert key.shape[0] == num_prefill_tokens + num_decode_tokens, f'{key.shape[0]} == {num_prefill_tokens} + {num_decode_tokens}'
         assert value.shape[0] == num_prefill_tokens + num_decode_tokens
 
         output = torch.empty_like(query)

@@ -266,9 +266,11 @@ class _AsyncLLMEngine(LLMEngine):
         else:
             prompt_token_ids = inputs["prompt_token_ids"]
 
-        return LLMInputs(prompt_token_ids=prompt_token_ids,
-                         prompt=inputs.get("prompt"),
-                         multi_modal_data=inputs.get("multi_modal_data"))
+        return LLMInputs(
+            prompt_token_ids=prompt_token_ids,
+            prompt=inputs.get("prompt"),
+            multi_modal_data=inputs.get("multi_modal_data")
+        )
 
     async def add_request_async(
         self,
@@ -661,10 +663,10 @@ class AsyncLLMEngine:
             >>> ...
         """
         async for output in self._process_request(
-                request_id,
-                inputs,
-                sampling_params,
-                lora_request=lora_request,
+            request_id,
+            inputs,
+            sampling_params,
+            lora_request=lora_request,
         ):
             yield LLMEngine.validate_output(output, RequestOutput)
 

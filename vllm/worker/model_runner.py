@@ -672,8 +672,15 @@ class ModelRunner:
     def prepare_input_tensors(
         self,
         seq_group_metadata_list: Optional[List[SequenceGroupMetadata]],
-    ) -> Tuple[torch.Tensor, torch.Tensor, AttentionMetadata, SamplingMetadata,
-               Set[LoRARequest], LoRAMapping, torch.Tensor]:
+    ) -> Tuple[
+        torch.Tensor, 
+        torch.Tensor, 
+        AttentionMetadata, 
+        SamplingMetadata,
+        Set[LoRARequest], 
+        LoRAMapping, 
+        torch.Tensor
+    ]:
         if self.is_driver_worker:
             assert seq_group_metadata_list is not None
             # Prepare input tensors.
@@ -780,7 +787,7 @@ class ModelRunner:
 
         if BENCHMARK_RUNNER: start_model.record()
         # Execute the model.
-        is_prompt = input_tokens.shape[-1] > 1
+        is_prompt = attn_metadata.prefill_metadata is not None
         
         # notify decoding
         # prompt notification is in HiPAttentionBackend
@@ -826,7 +833,13 @@ class ModelRunner:
         }
         if self.vision_language_config:
             execute_model_kwargs.update({"image_input": multi_modal_input})
-        print('input', input_tokens.shape)
+        # print(
+        #     'input', 
+        #     input_tokens.shape, 
+        #     multi_modal_input.shape if multi_modal_input is not None else None, 
+        #     len(seq_group_metadata_list), 
+        #     [[d.get_len() for d in seq.seq_data.values()] for seq in seq_group_metadata_list]
+        # )
         hidden_states = model_executable(**execute_model_kwargs)
 
         # Compute the logits.
