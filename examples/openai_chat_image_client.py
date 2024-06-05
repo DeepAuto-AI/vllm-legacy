@@ -344,8 +344,8 @@ def chat(
         ],
         temperature=0.7,
         top_p=0.9,
-        n=4,
-        max_tokens=512,
+        n=8,
+        max_tokens=16,
     )
     
     print(response)

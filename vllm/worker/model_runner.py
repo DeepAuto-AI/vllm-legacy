@@ -711,8 +711,12 @@ class ModelRunner:
                 num_prefills,
             ) = self._prepare_model_input(seq_group_metadata_list)
             sampling_metadata = SamplingMetadata.prepare(
-                seq_group_metadata_list, seq_lens, query_lens, self.device,
-                self.pin_memory)
+                seq_group_metadata_list, 
+                seq_lens, 
+                query_lens, 
+                self.device,
+                self.pin_memory
+            )
 
             metadata_dict = {
                 "input_tokens": input_tokens,
@@ -762,6 +766,7 @@ class ModelRunner:
         kv_caches: List[torch.Tensor],
     ) -> Optional[SamplerOutput]:
         BENCHMARK_RUNNER = os.environ.get('BENCHMARK_RUNNER', '0') == '1'
+        DISABLE_SAMPLING = os.environ.get('DISABLE_SAMPLING', '0') == '1'
         
         if BENCHMARK_RUNNER:
             t_start = time.time()
@@ -878,12 +883,48 @@ class ModelRunner:
             return None
 
         # Sample the next token.
-        if BENCHMARK_RUNNER: start_sample.record()
-        output = self.model.sample(
-            logits=logits,
-            sampling_metadata=sampling_metadata,
-        )
-        if BENCHMARK_RUNNER: end_sample.record()
+        if BENCHMARK_RUNNER: 
+            t_sample = time.time()
+            start_sample.record()
+        if DISABLE_SAMPLING:
+            from vllm.sequence import SamplerOutput, CompletionSequenceGroupOutput, SequenceOutput, Logprob
+            next_token_index = torch.argmax(logits, dim=-1).cpu().tolist()
+            idx_seq = 0
+            sample_outputs = []
+            for i, seq in enumerate(seq_group_metadata_list):
+                seq_outputs = []
+                for prev_seq_id in seq.seq_data:
+                    for _ in range(
+                        sampling_metadata.seq_groups[i].sampling_params.n
+                        if sampling_metadata.seq_groups[i].is_prompt else
+                        1
+                    ):
+                        seq_outputs.append(
+                            SequenceOutput(
+                                prev_seq_id, 
+                                next_token_index[idx_seq], {
+                                    next_token_index[idx_seq]: Logprob(1.0, 1, None)
+                                }
+                            )
+                        )
+                    idx_seq += 1
+                sample_outputs.append(CompletionSequenceGroupOutput(seq_outputs, None))
+            output = SamplerOutput(
+                sample_outputs,
+                None,
+                None,
+                None,
+                None,
+            )
+        else:
+            output = self.model.sample(
+                logits=logits,
+                sampling_metadata=sampling_metadata,
+            )
+        # print(output)
+        if BENCHMARK_RUNNER: 
+            t_sample = time.time() - t_sample
+            end_sample.record()
         
         if BENCHMARK_RUNNER:
             torch.cuda.synchronize()
@@ -896,6 +937,7 @@ class ModelRunner:
                 # in main process
                 n_tokens = input_tokens.shape[0]
                 elapsed_model_per_token = elapsed_model / n_tokens
+                print(t_sample, logits.device, logits.shape)
                 print(f'[{time.time() * 1000:.3f}][{type(model_executable)}, {len(seq_group_metadata_list) if seq_group_metadata_list is not None else None}, {n_tokens}](is_prompt: {is_prompt}) prepare: {elapsed_prepare:.3f}, model: {elapsed_model:.3f}({self.metrics[is_prompt]["model"].update(elapsed_model):.3f}), model_per_token: {elapsed_model_per_token:.3f}({self.metrics[is_prompt]["model_per_token"].update(elapsed_model_per_token):.3f}) sample: {elapsed_sample:.3f}, total: {elapsed_total:.3f}')
         
         return output

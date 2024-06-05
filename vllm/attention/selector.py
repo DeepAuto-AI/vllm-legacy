@@ -69,7 +69,7 @@ def get_attn_backend(
         from vllm.attention.backends.flashinfer import FlashInferBackend
         return FlashInferBackend
     elif backend == _Backend.HIP_ATTN:
-        logger.info("Using Torch SDPA backend.")
+        logger.info("Using HiP Attention backend.")
         from vllm.attention.backends.hip import HiPAttentionBackend
         return HiPAttentionBackend
     else:

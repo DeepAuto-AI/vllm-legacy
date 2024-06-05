@@ -518,7 +518,7 @@ class HiPAttentionImpl(AttentionImpl[HiPAttentionMetadata]):
         elif method == 'hip':
             assert rope_method in ['none', 'self_extend']
             
-            warnings.warn('prompt attention backend is hip')
+            # warnings.warn('prompt attention backend is hip')
             
             original_query = query
             
@@ -769,7 +769,7 @@ class HiPAttentionImpl(AttentionImpl[HiPAttentionMetadata]):
             elif paged_backend == 'hip':
                 assert rope_method in ['none', 'self_extend']
                 
-                warnings.warn('paged attention backend is hip')
+                # warnings.warn('paged attention backend is hip')
                 
                 output, (indices, ks, _) = paged_timber_attention(
                     q=query,
