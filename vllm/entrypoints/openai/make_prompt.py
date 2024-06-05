@@ -22,37 +22,74 @@ INTERNLM_XCOMPOSER2_TEMPLATE = (
     "{% endif %}"
 )
 
+RE_TGI_IMAGE_MARKDOWN = re.compile(r'!\[([^\]]*)]\(data:([^;]*);base64,([-A-Za-z0-9+/]*={0,3})\)')
+RE_OPENAI_IMAGE_URL = re.compile(r'data:([^;]*);base64,([-A-Za-z0-9+/]*={0,3})')
 
 def make_prompt(request: ChatCompletionRequest,
                 tokenizer: PreTrainedTokenizer):
-
     images = []
 
-    for msg in request.messages:
+    def replace_tgi_image_markdown(match):
+        display_text = match.group(1)
+        mime_type = match.group(2)
+        base64_string = match.group(3)
+        return replace_image(mime_type, base64_string)
+
+    def replace_openai_image_url(match):
+        mime_type = match.group(1)
+        base64_string = match.group(2)
+        return replace_image(mime_type, base64_string)
+
+    def replace_image(mime_type, base64_string):
+        # Convert base64 to bytesIO
+        file = BytesIO(b64decode(base64_string, validate=True))
+        # FIXME: Filter out unsupported image types
+        if mime_type.startswith('image/'):
+            image = Image.open(file).convert('RGB')
+            # TODO: encode image to tokens
+            if image.size != (16, 16):
+                images.append(image)
+                return "[[IMAGE_GOES_HERE]]"
+            # FIXME: Is this expected?
+            raise ValueError("Image size is not supported")
+        else:
+            raise ValueError(f"Unsupported mime type: {mime_type}")
+
+    for idx, msg in enumerate(request.messages):
         if msg['role'] == 'system' and msg['content'] == "":
             msg['content'] = DEFAULT_SYSTEM_PROMPT
 
-        def replace_file(match):
-            display_text = match.group(1)
-            mime_type = match.group(2)
-            base64_string = match.group(3)
+        if isinstance(msg['content'], str):
+            # Replace TGI image markdown `![](base64)`` with placeholder
+            msg['content'] = re.sub(
+                RE_TGI_IMAGE_MARKDOWN,
+                replace_tgi_image_markdown,
+                msg['content'],
+            )
+        else:
+            new_content = ""
+            for i, c in enumerate(msg['content']):
+                if c["type"] == "text":
+                    new_content = new_content + (c["text"])
+                elif c["type"] == "image_url":
+                    if idx == 0 and msg['role'] == 'system':
+                        # This is to follow OpenAI's limitation:
+                        #    https://platform.openai.com/docs/guides/vision/quick-start
+                        raise ValueError("Image in the first system message is not supported")
 
-            # Convert base64 to bytesIO
-            file = BytesIO(b64decode(base64_string, validate=True))
-            if mime_type.startswith('image/'):
-                image = Image.open(file).convert('RGB')
-                # TODO: encode image to tokens
-                if image.size != (16, 16):
-                    images.append(image)
-                    return "[[IMAGE_GOES_HERE]]"
-                return display_text
-            else:
-                raise ValueError(f"Unsupported mime type: {mime_type}")
-
-        msg['content'] = re.sub(
-            r'!\[([^\]]*)]\(data:([^;]*);base64,([-A-Za-z0-9+/]*={0,3})\)',
-            replace_file, msg['content']
-        )
+                    image_url = c["image_url"]["url"]
+                    if not RE_OPENAI_IMAGE_URL.match(image_url):
+                        raise ValueError("Invalid image.")
+                    new_content = new_content + re.sub(
+                        RE_OPENAI_IMAGE_URL,
+                        replace_openai_image_url, image_url
+                    )
+                    # TODO: Add support for detail
+                else:
+                    raise ValueError(f"Unsupported content type: {c['type']}")
+                if i < len(msg['content']) - 1:
+                    new_content = new_content + " "
+            msg['content'] = new_content
 
     if 'internlm/internlm-xcomposer2' in tokenizer.name_or_path:
         tokenizer.chat_template = INTERNLM_XCOMPOSER2_TEMPLATE
