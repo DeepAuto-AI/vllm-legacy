@@ -215,6 +215,8 @@ class HiPAttentionImpl(AttentionImpl[HiPAttentionMetadata]):
         assert layer_index is not None, 'layer index should be not none'
         
         self.hip_k = int(os.environ.get('HIP_K', '1024'))
+        self.hip_block_size_q = int(os.environ.get('HIP_BLOCK_SIZE_Q', '32'))
+        self.hip_block_size_k = int(os.environ.get('HIP_BLOCK_SIZE_K', '2'))
         self.hip_dense_layers = list(range(int(os.environ.get('HIP_DENSE_LAYERS', '3'))))
         # self.hip_high_k_layers = {}
         
@@ -266,7 +268,10 @@ class HiPAttentionImpl(AttentionImpl[HiPAttentionMetadata]):
 
         if kv_cache is not None:
             key_cache, value_cache = PagedAttention.split_kv_cache(
-                kv_cache, self.num_kv_heads, self.head_size)
+                kv_cache, 
+                self.num_kv_heads, 
+                self.head_size
+            )
 
             # Reshape the input keys and values and store them in the cache.
             # If kv_cache is not provided, the new key and value tensors are
@@ -314,8 +319,8 @@ class HiPAttentionImpl(AttentionImpl[HiPAttentionMetadata]):
         assert query.shape[0] == num_prefill_tokens
         assert decode_query.shape[0] == num_decode_tokens
         
-        prompt_method = 'hip'
-        decode_method = 'hip'
+        prompt_method: Literal['hip', 'vllm'] = 'hip'
+        decode_method: Literal['hip', 'vllm'] = 'hip'
         if self.layer_index in self.hip_dense_layers:
             decode_method = 'vllm'
 
@@ -339,26 +344,80 @@ class HiPAttentionImpl(AttentionImpl[HiPAttentionMetadata]):
                 # TODO(Hai) this triton kernel has regression issue (broke) to
                 # deal with different data types between KV and FP8 KV cache,
                 # to be addressed separately.
-                out = PagedAttention.forward_prefix(
-                    query,
-                    key,
-                    value,
-                    key_cache,
-                    value_cache,
-                    prefill_meta.block_tables,
-                    prefill_meta.query_start_loc,
-                    prefill_meta.seq_lens_tensor,
-                    prefill_meta.context_lens_tensor,
-                    prefill_meta.max_query_len,
-                    self.alibi_slopes,
-                    self.sliding_window,
-                )
-                assert output[:num_prefill_tokens].shape == out.shape
+                if prompt_method == 'vllm':
+                    out = PagedAttention.forward_prefix(
+                        query,
+                        key,
+                        value,
+                        key_cache,
+                        value_cache,
+                        prefill_meta.block_tables,
+                        prefill_meta.query_start_loc,
+                        prefill_meta.seq_lens_tensor,
+                        prefill_meta.context_lens_tensor,
+                        prefill_meta.max_query_len,
+                        self.alibi_slopes,
+                        self.sliding_window,
+                    )
+                elif prompt_method == 'hip':
+                    _BATCH_SIZE = len(prefill_meta.context_lens_tensor)
+                    _TDST, _HEAD_SIZE, _HID = query.shape
+                    
+                    if _BATCH_SIZE == 1:
+                        query_batch_first = query.permute(1, 0, 2).contiguous()
+                        
+                        attn_output, (indices, ks, _) = paged_timber_attention(
+                            q=query_batch_first,
+                            q_scale=self.scale,
+                            k=key_cache,
+                            v=value_cache,
+                            attention_mask=None,
+                            
+                            block_tables=prefill_meta.block_tables,
+                            context_lens=prefill_meta.seq_lens_tensor,
+                            max_context_len=prefill_meta.max_query_len,
+                            
+                            mask_k=self.hip_k,
+                            block_size_q=self.hip_block_size_q,
+                            block_size_k=self.hip_block_size_k,
+                            
+                            rope_method=rope_method,
+                            rope_cos=rope_cos,
+                            rope_sin=rope_sin,
+                            position_ids=position_ids.repeat_interleave(self.num_heads, 0) if rope_method != 'none' else None,
+                            
+                            self_extend_scale=self.self_extend_scale,
+                            self_extend_window=self.self_extend_window,
+                            
+                            query_format='NH_TDST_D',
+                        )
+                        
+                        out = attn_output.permute(1, 0, 2)
+                        assert query.shape == out.shape, f'{query.shape} == {out.shape}'
+                    else:
+                        out = PagedAttention.forward_prefix(
+                            query,
+                            key,
+                            value,
+                            key_cache,
+                            value_cache,
+                            prefill_meta.block_tables,
+                            prefill_meta.query_start_loc,
+                            prefill_meta.seq_lens_tensor,
+                            prefill_meta.context_lens_tensor,
+                            prefill_meta.max_query_len,
+                            self.alibi_slopes,
+                            self.sliding_window,
+                        )
+                    # raise Exception(f'unknown backend {prompt_method},{query.shape},{key.shape},{value.shape},{prefill_meta.block_tables},{prefill_meta.query_start_loc},{prefill_meta.seq_lens_tensor},{prefill_meta.context_lens_tensor},{prefill_meta.max_query_len}')
+                else:
+                    raise Exception(f'unknown backend {prompt_method}')
+                assert output[:num_prefill_tokens].shape == out.shape, f'{output[:num_prefill_tokens].shape} == {out.shape}'
                 output[:num_prefill_tokens] = out
 
         if decode_meta := attn_metadata.decode_metadata:
             # Decoding run.
-            if decode_method == 'vllm':
+            if decode_method == 'vllm' or (attn_metadata.max_decode_seq_len < (self.hip_k * 3)):
                 output[num_prefill_tokens:] = PagedAttention.forward_decode(
                     decode_query,
                     key_cache,
@@ -395,8 +454,8 @@ class HiPAttentionImpl(AttentionImpl[HiPAttentionMetadata]):
                     max_context_len=attn_metadata.max_decode_seq_len,
                     
                     mask_k=self.hip_k,
-                    block_size_q=32,
-                    block_size_k=2,
+                    block_size_q=self.hip_block_size_q,
+                    block_size_k=self.hip_block_size_k,
                     
                     rope_method=rope_method,
                     rope_cos=rope_cos,
@@ -546,8 +605,8 @@ class HiPAttentionImpl(AttentionImpl[HiPAttentionMetadata]):
                     attention_mask=None,
                     
                     mask_k=self.hip_k,
-                    block_size_q=32,
-                    block_size_k=2,
+                    block_size_q=self.hip_block_size_q,
+                    block_size_k=self.hip_block_size_k,
                     
                     dense_queries_exp=None if rope_method == 'none' else 0,
                     

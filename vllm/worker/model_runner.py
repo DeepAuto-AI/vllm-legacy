@@ -889,6 +889,7 @@ class ModelRunner:
             start_sample.record()
         
         if DISABLE_SAMPLING:
+            # NOTE(ain): faster alternative for temporary
             from vllm.sequence import SamplerOutput, CompletionSequenceGroupOutput, SequenceOutput, Logprob
             sampling_k = 32
             sampling_p = 0.9
@@ -918,20 +919,32 @@ class ModelRunner:
             for i, seq in enumerate(seq_group_metadata_list):
                 seq_outputs = []
                 for prev_seq_id in seq.seq_data:
+                    has_token = True
                     for _ in range(
                         sampling_metadata.seq_groups[i].sampling_params.n
                         if sampling_metadata.seq_groups[i].is_prompt else
                         1
                     ):
-                        seq_outputs.append(
-                            SequenceOutput(
-                                prev_seq_id, 
-                                next_token_index[idx_seq], {
-                                    next_token_index[idx_seq]: Logprob(1.0, 1, None)
-                                }
+                        if (attn_metadata.prefill_metadata is not None) and (not (kv_cache is None or attn_metadata.prefill_metadata.block_tables.numel() == 0)):
+                            # prefill & prefix
+                            seq_outputs.append(
+                                SequenceOutput(
+                                    prev_seq_id, 0, {0: Logprob(1.0, 1, None)}
+                                )
                             )
-                        )
-                    idx_seq += 1
+                            has_token = False
+                        else:
+                            assert idx_seq < len(next_token_index), f'{idx_seq} < {len(next_token_index)}, {logits.shape}'
+                            seq_outputs.append(
+                                SequenceOutput(
+                                    prev_seq_id, 
+                                    next_token_index[idx_seq], {
+                                        next_token_index[idx_seq]: Logprob(1.0, 1, None)
+                                    }
+                                )
+                            )
+                    if has_token:
+                        idx_seq += 1
                 sample_outputs.append(CompletionSequenceGroupOutput(seq_outputs, None))
             
             output = SamplerOutput(

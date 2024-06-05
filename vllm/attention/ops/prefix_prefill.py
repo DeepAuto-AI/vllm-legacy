@@ -119,6 +119,8 @@ if triton.__version__ >= "2.1.0":
                         mask=dim_mask[:, None] &
                         ((start_n + offs_n[None, :]) < cur_batch_ctx_len),
                         other=0.0)  # [D,N]
+            if k.dtype == tl.uint8:
+                k = k.to(tl.float8e5, bitcast=True).to(q.dtype)
 
             qk = tl.zeros([BLOCK_M, BLOCK_N], dtype=tl.float32)  # [M,N]
             qk += tl.dot(q, k)
@@ -163,7 +165,9 @@ if triton.__version__ >= "2.1.0":
                         mask=dim_mask[None, :] &
                         ((start_n + offs_n[:, None]) < cur_batch_ctx_len),
                         other=0.0)  # [N,D]
-
+            if v.dtype == tl.uint8:
+                v = v.to(tl.float8e5, bitcast=True).to(tl.float16)
+            
             p = p.to(v.dtype)
             acc += tl.dot(p, v)
             # # update m_i and l_i
@@ -334,6 +338,8 @@ if triton.__version__ >= "2.1.0":
             k = tl.load(K_cache + off_k,
                         mask=(start_n + offs_n[None, :]) < cur_batch_ctx_len,
                         other=0.0)
+            if k.dtype == tl.uint8:
+                k = k.to(tl.float8e5, bitcast=True).to(q.dtype)
 
             qk = tl.zeros([BLOCK_M, BLOCK_N], dtype=tl.float32)
             qk += tl.dot(q, k)
@@ -360,7 +366,9 @@ if triton.__version__ >= "2.1.0":
             v = tl.load(V_cache + off_v,
                         mask=(start_n + offs_n[:, None]) < cur_batch_ctx_len,
                         other=0.0)
-
+            if v.dtype == tl.uint8:
+                v = v.to(tl.float8e5, bitcast=True).to(tl.float16)
+            
             p = p.to(v.dtype)
             acc += tl.dot(p, v)
             # update m_i and l_i
@@ -539,6 +547,8 @@ if triton.__version__ >= "2.1.0":
                         mask=dim_mask[:, None] &
                         ((start_n + offs_n[None, :]) < cur_batch_ctx_len),
                         other=0.0)  # [D,N]
+            if k.dtype == tl.uint8:
+                k = k.to(tl.float8e5, bitcast=True).to(q.dtype)
 
             qk = tl.zeros([BLOCK_M, BLOCK_N], dtype=tl.float32)
             qk += tl.dot(q, k)
@@ -575,6 +585,8 @@ if triton.__version__ >= "2.1.0":
                         mask=dim_mask[None, :] &
                         ((start_n + offs_n[:, None]) < cur_batch_ctx_len),
                         other=0.0)
+            if v.dtype == tl.uint8:
+                v = v.to(tl.float8e5, bitcast=True).to(tl.float16)
 
             p = p.to(v.dtype)
             acc += tl.dot(p, v, allow_tf32=False)

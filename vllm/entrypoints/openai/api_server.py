@@ -84,6 +84,17 @@ async def health() -> Response:
     await openai_serving_chat.engine.check_health()
     return Response(status_code=200)
 
+@app.get("/dev/metrics/runner")
+async def show_dev_metrics_runner():
+    metrics = openai_serving_completion.engine.engine.model_executor.driver_worker.worker.model_runner.metrics
+    return JSONResponse(content={
+        'prompt': {
+            'model_per_token': metrics[True]['model_per_token'].avg()
+        },
+        'decode': {
+            'model_per_token': metrics[False]['model_per_token'].avg()
+        }
+    })
 
 @app.get("/v1/models")
 async def show_available_models():
@@ -96,10 +107,11 @@ async def show_version():
     ver = {"version": vllm.__version__}
     return JSONResponse(content=ver)
 
-
 @app.post("/v1/chat/completions")
-async def create_chat_completion(request: ChatCompletionRequest,
-                                 raw_request: Request):
+async def create_chat_completion(
+    request: ChatCompletionRequest,
+    raw_request: Request
+):
     generator = await openai_serving_chat.create_chat_completion(
         request, raw_request)
     if isinstance(generator, ErrorResponse):
@@ -121,8 +133,7 @@ async def create_completion(request: CompletionRequest, raw_request: Request):
         return JSONResponse(content=generator.model_dump(),
                             status_code=generator.code)
     if request.stream:
-        return StreamingResponse(content=generator,
-                                 media_type="text/event-stream")
+        return StreamingResponse(content=generator, media_type="text/event-stream")
     else:
         return JSONResponse(content=generator.model_dump())
 
@@ -200,11 +211,14 @@ if __name__ == "__main__":
         # When using single vLLM without engine_use_ray
         model_config = asyncio.run(engine.get_model_config())
 
-    openai_serving_chat = OpenAIServingChat(engine, model_config,
-                                            served_model_names,
-                                            args.response_role,
-                                            args.lora_modules,
-                                            args.chat_template)
+    openai_serving_chat = OpenAIServingChat(
+        engine, 
+        model_config,
+        served_model_names,
+        args.response_role,
+        args.lora_modules,
+        args.chat_template
+    )
     openai_serving_completion = OpenAIServingCompletion(
         engine, model_config, served_model_names, args.lora_modules)
     openai_serving_embedding = OpenAIServingEmbedding(engine, model_config,
