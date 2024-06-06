@@ -25,7 +25,7 @@ from vllm.attention.backends.abstract import (
 from vllm.attention.ops.paged_attn import (
     PagedAttention
 )
-from timber import paged_timber_attention, timber_attention
+from hip import paged_hip_attention, hip_attention
 
 @dataclass
 class HiPAttentionMetadata(AttentionMetadata, PagedAttentionMetadata):
@@ -366,7 +366,7 @@ class HiPAttentionImpl(AttentionImpl[HiPAttentionMetadata]):
                     if _BATCH_SIZE == 1:
                         query_batch_first = query.permute(1, 0, 2).contiguous()
                         
-                        attn_output, (indices, ks, _) = paged_timber_attention(
+                        attn_output, (indices, ks, _) = paged_hip_attention(
                             q=query_batch_first,
                             q_scale=self.scale,
                             k=key_cache,
@@ -442,7 +442,7 @@ class HiPAttentionImpl(AttentionImpl[HiPAttentionMetadata]):
                 _k = key_cache
                 _v = value_cache
                 
-                attn_output, (indices, ks, _) = paged_timber_attention(
+                attn_output, (indices, ks, _) = paged_hip_attention(
                     q=decode_query,
                     q_scale=self.scale,
                     k=_k,
@@ -598,7 +598,7 @@ class HiPAttentionImpl(AttentionImpl[HiPAttentionMetadata]):
                 #     scale=self.scale
                 # )
                 
-                out, _ = timber_attention(
+                out, _ = hip_attention(
                     q=query_batch_first[:, start:end] * self.scale,
                     k=key_batch_first[:, start:end],
                     v=value_batch_first[:, start:end],
@@ -768,7 +768,7 @@ class HiPAttentionImpl(AttentionImpl[HiPAttentionMetadata]):
                     assert (attn_metadata.attn_bias is None) or isinstance(attn_metadata.attn_bias, BlockDiagonalCausalMask), f'{attn_metadata.attn_bias}'
                     assert self.alibi_slopes is None
                     
-                    output, _ = timber_attention(
+                    output, _ = hip_attention(
                         q=query * self.scale,
                         k=key,
                         v=value,
@@ -830,7 +830,7 @@ class HiPAttentionImpl(AttentionImpl[HiPAttentionMetadata]):
                 
                 # warnings.warn('paged attention backend is hip')
                 
-                output, (indices, ks, _) = paged_timber_attention(
+                output, (indices, ks, _) = paged_hip_attention(
                     q=query,
                     q_scale=self.scale,
                     k=key_cache,

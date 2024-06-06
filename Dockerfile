@@ -135,11 +135,11 @@ RUN --mount=type=cache,target=/root/.cache/pip \
     pip install accelerate hf_transfer modelscope
 
 ENV VLLM_USAGE_SOURCE production-docker-image
-# install timber
-RUN mkdir /workspace/timber
-COPY --from=timber timber /workspace/timber/timber
-COPY --from=timber setup.py /workspace/timber/setup.py
-RUN pip install -e /workspace/timber \
+# install hip
+RUN mkdir /workspace/hip
+COPY --from=hip hip /workspace/hip/hip
+COPY --from=hip setup.py /workspace/hip/setup.py
+RUN pip install -e /workspace/hip \
     && pip install numba
 
 COPY --from=build /workspace/vllm/*.so /workspace/vllm/
