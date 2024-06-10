@@ -805,7 +805,7 @@ class ModelRunner:
 
         if BENCHMARK_RUNNER: start_model.record()
         # Execute the model.
-        is_prompt = attn_metadata.prefill_metadata is not None
+        is_prompt = (attn_metadata is not None) and (attn_metadata.prefill_metadata is not None)
         
         # notify decoding
         # prompt notification is in HiPAttentionBackend
@@ -818,9 +818,14 @@ class ModelRunner:
                 if hasattr(v_cache, 'decode_start'):
                     v_cache.decode_start()
         
-        prefill_meta = attn_metadata.prefill_metadata
-        decode_meta = attn_metadata.decode_metadata
-        if prefill_meta is None and decode_meta.use_cuda_graph:
+        if attn_metadata is not None:
+            prefill_meta = attn_metadata.prefill_metadata
+            decode_meta = attn_metadata.decode_metadata
+        else:
+            prefill_meta = decode_meta = None
+        use_cuda_graph = decode_meta.use_cuda_graph if decode_meta is not None else False
+        
+        if prefill_meta is None and use_cuda_graph:
             graph_batch_size = input_tokens.shape[0]
             model_executable = self.graph_runners[graph_batch_size]
             if isinstance(model_executable, CUDAGraphRunner):
@@ -844,7 +849,7 @@ class ModelRunner:
                     raise Exception()
         
         if not is_prompt:
-            if not (prefill_meta is None and decode_meta.use_cuda_graph):
+            if not (prefill_meta is None and use_cuda_graph):
                 warnings.warn("CUDA graph is suggested for decoding")
         # print(prefill_meta is None, decode_meta.use_cuda_graph if decode_meta is not None else None)
         
@@ -1026,8 +1031,8 @@ class ModelRunner:
                 int(max_num_batched_tokens /
                     self.vision_language_config.image_feature_size))
         for group_id in range(max_num_seqs):
-            seq_len = (max_num_batched_tokens // max_num_seqs +
-                       (group_id < max_num_batched_tokens % max_num_seqs))
+            seq_len = (max_num_batched_tokens // max_num_seqs + (group_id < max_num_batched_tokens % max_num_seqs))
+            assert seq_len > 0, f'({max_num_batched_tokens} // {max_num_seqs} + ({group_id} < {max_num_batched_tokens} % {max_num_seqs})) = {seq_len}'
             seq_data, fake_multi_modal_input = _prepare_fake_inputs(
                 seq_len, self.vision_language_config)
             seq = SequenceGroupMetadata(

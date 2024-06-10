@@ -310,6 +310,7 @@ class LlamaModel(nn.Module):
         if inputs_embeds is not None:
             hidden_states = inputs_embeds
         else:
+            assert input_ids.dtype in [torch.long, torch.int], f'{input_ids.dtype}[{tuple(input_ids.shape)}]'
             hidden_states = self.get_input_embeddings(input_ids)
         residual = None
         for i in range(len(self.layers)):
