@@ -49,6 +49,8 @@ class ChatMessageParseResult:
     messages: List[ConversationMessage]
     is_multimodal: bool = False
 
+from pydantic import Field
+
 class CompletionPerformanceStatistics(OpenAIBaseModel):
     # store when this statistics class created
     statistics_created_at: float
@@ -64,16 +66,20 @@ class CompletionPerformanceStatistics(OpenAIBaseModel):
     runner_last_sampler_latency: Optional[float] = None
     # estimated current request throughput (tok / sec)
     request_throughput: Optional[float] = None
+    # is this completion step prompt?
+    is_prompt: Optional[bool] = None
+    # how many token processed for this sequence in this step?
+    num_processed_tokens: Optional[int] = None
     
 
 class ChatCompletionStreamResponseWithStatistics(ChatCompletionStreamResponse):
-    performance: Optional[CompletionPerformanceStatistics] = None
+    performance: Optional[CompletionPerformanceStatistics] = Field(default=None)
 
 class PerformanceTracker:
     def __init__(self):
         self.created_at = time_ms()
     
-    def step(self, output: RequestOutput) -> CompletionPerformanceStatistics:
+    def step(self, output: RequestOutput, first_iteration: bool) -> CompletionPerformanceStatistics:
         if output.metrics.last_runner_latency is not None and len(output.metrics.last_runner_latency) > 0:
             return CompletionPerformanceStatistics(
                 statistics_created_at=time_ms(),
@@ -82,12 +88,19 @@ class PerformanceTracker:
                 runner_last_model_latency=output.metrics.last_runner_model_latency[-1],
                 runner_last_perpare_latency=output.metrics.last_runner_prepare_latency[-1],
                 runner_last_sampler_latency=output.metrics.last_runner_sampler_latency[-1],
-                request_throughput=1.0 / (output.metrics.last_runner_latency[-1] / 1000),
+                request_throughput=(
+                    (1.0 / (output.metrics.last_runner_latency[-1] / 1000))
+                    if not first_iteration else
+                    ((len(output.prompt_token_ids) + 1) / (output.metrics.last_runner_latency[-1] / 1000))
+                ),
+                is_prompt=first_iteration,
+                num_processed_tokens=(len(output.prompt_token_ids) + 1) if first_iteration else 1
             )
         else:
             return CompletionPerformanceStatistics(
                 statistics_created_at=time_ms(),
                 request_created_at=time_ms(),
+                is_prompt=first_iteration,
             )
 
 class OpenAIServingChat(OpenAIServing):
@@ -198,8 +211,11 @@ class OpenAIServingChat(OpenAIServing):
         self,
         request: ChatCompletionRequest,
         raw_request: Optional[Request] = None
-    ) -> Union[ErrorResponse, AsyncGenerator[str, None],
-               ChatCompletionResponse]:
+    ) -> Union[
+        ErrorResponse, 
+        AsyncGenerator[str, None],
+        ChatCompletionResponse
+    ]:
         """Completion API similar to OpenAI's API.
 
         See https://platform.openai.com/docs/api-reference/chat/create
@@ -330,9 +346,11 @@ class OpenAIServingChat(OpenAIServing):
             return request.messages[-1]["role"]
 
     async def chat_completion_stream_generator(
-            self, request: ChatCompletionRequest,
-            result_generator: AsyncIterator[RequestOutput], request_id: str,
-            conversation: List[ConversationMessage]
+        self, 
+        request: ChatCompletionRequest,
+        result_generator: AsyncIterator[RequestOutput],
+        request_id: str,
+        conversation: List[ConversationMessage]
     ) -> AsyncGenerator[str, None]:
         model_name = self.served_model_names[0]
         created_time = int(time.time())
@@ -347,6 +365,8 @@ class OpenAIServingChat(OpenAIServing):
         performance_tracker = PerformanceTracker()
         try:
             async for res in result_generator:
+                performance_statistics = performance_tracker.step(res, first_iteration)
+                
                 # We need to do it here, because if there are exceptions in
                 # the result_generator, it needs to be sent as the FIRST
                 # response (by the try...catch).
@@ -360,7 +380,7 @@ class OpenAIServingChat(OpenAIServing):
                             delta=DeltaMessage(role=role),
                             logprobs=None,
                             finish_reason=None)
-                        chunk = ChatCompletionStreamResponseWithStatistics(
+                        chunk = ChatCompletionStreamResponse(
                             id=request_id,
                             object=chunk_object_type,
                             created=created_time,
@@ -369,7 +389,7 @@ class OpenAIServingChat(OpenAIServing):
                         )
                         data = chunk.model_dump_json(exclude_unset=True)
                         yield f"data: {data}\n\n"
-
+                    
                     # Send response to echo the input portion of the
                     # last message
                     if request.echo:
@@ -387,7 +407,7 @@ class OpenAIServingChat(OpenAIServing):
                                         delta=DeltaMessage(
                                             content=last_msg_content),
                                         finish_reason=None))
-                                chunk = ChatCompletionStreamResponseWithStatistics(
+                                chunk = ChatCompletionStreamResponse(
                                     id=request_id,
                                     object=chunk_object_type,
                                     created=created_time,
@@ -397,12 +417,9 @@ class OpenAIServingChat(OpenAIServing):
                                 )
                                 data = chunk.model_dump_json(
                                     exclude_unset=True)
+                                print('fifififi', data)
                                 yield f"data: {data}\n\n"
                     first_iteration = False
-                
-                performance_statistics = performance_tracker.step(output)
-                
-                print(performance_statistics)
                 
                 for output in res.outputs:
                     i = output.index
@@ -458,7 +475,8 @@ class OpenAIServingChat(OpenAIServing):
                             delta=DeltaMessage(content=delta_text),
                             logprobs=logprobs,
                             finish_reason=output.finish_reason,
-                            stop_reason=output.stop_reason)
+                            stop_reason=output.stop_reason
+                        )
                         chunk = ChatCompletionStreamResponseWithStatistics(
                             id=request_id,
                             object=chunk_object_type,
@@ -475,8 +493,14 @@ class OpenAIServingChat(OpenAIServing):
                         finish_reason_sent[i] = True
         except ValueError as e:
             # TODO: Use a vllm-specific Validation Error
+            import traceback
+            traceback.print_exc()
             data = self.create_streaming_error_response(str(e))
             yield f"data: {data}\n\n"
+        except Exception as e:
+            import traceback
+            traceback.print_exc()
+            raise e
         # Send the final done message after all response.n are finished
         yield "data: [DONE]\n\n"
 

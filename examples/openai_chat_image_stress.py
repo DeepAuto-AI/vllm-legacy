@@ -365,7 +365,7 @@ def thread_main(
             temperature=0.7,
             top_p=0.9,
             n=num_seqs,
-            max_tokens=512,
+            max_tokens=2048,
         )
         
         result_queue.put((thread_id, response))

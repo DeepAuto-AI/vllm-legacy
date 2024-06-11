@@ -137,8 +137,10 @@ async def create_chat_completion(
         return JSONResponse(content=generator.model_dump(),
                             status_code=generator.code)
     if request.stream:
-        return StreamingResponse(content=generator,
-                                 media_type="text/event-stream")
+        return StreamingResponse(
+            content=generator,
+            media_type="text/event-stream"
+        )
     else:
         assert isinstance(generator, ChatCompletionResponse)
         return JSONResponse(content=generator.model_dump())
