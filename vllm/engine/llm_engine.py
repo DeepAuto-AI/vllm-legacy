@@ -675,6 +675,24 @@ class LLMEngine:
 
         Returns RequestOutputs that can be returned to the client.
         """
+        
+        last_sampler_output = output[-1] if len(output) > 0 else None
+        if hasattr(last_sampler_output, 'performance_statistics'):
+            elapsed_seq = [s.performance_statistics.elapsed for s in output]
+            elapsed_prepare_seq = [s.performance_statistics.elapsed_prepare for s in output]
+            elapsed_model_seq = [s.performance_statistics.elapsed_model for s in output]
+            elapsed_sampler_seq = [s.performance_statistics.elapsed_sampler for s in output]
+            for seq_group in scheduled_seq_groups:
+                seq_group.seq_group.metrics.last_runner_latency = elapsed_seq
+                seq_group.seq_group.metrics.last_runner_prepare_latency = elapsed_prepare_seq
+                seq_group.seq_group.metrics.last_runner_model_latency = elapsed_model_seq
+                seq_group.seq_group.metrics.last_runner_sampler_latency = elapsed_sampler_seq
+        else:
+            for seq_group in scheduled_seq_groups:
+                seq_group.seq_group.metrics.last_runner_latency = None
+                seq_group.seq_group.metrics.last_runner_prepare_latency = None
+                seq_group.seq_group.metrics.last_runner_model_latency = None
+                seq_group.seq_group.metrics.last_runner_sampler_latency = None
 
         now = time.time()
 
@@ -684,9 +702,15 @@ class LLMEngine:
             output, num_seq_groups=len(scheduled_seq_groups))
 
         # Update the scheduled sequence groups with the model outputs.
-        for scheduled_seq_group, outputs, seq_group_meta in zip(
-                scheduled_seq_groups, output_by_sequence_group,
-                seq_group_metadata_list):
+        for (
+            scheduled_seq_group, 
+            outputs, 
+            seq_group_meta
+        ) in zip(
+            scheduled_seq_groups, 
+            output_by_sequence_group,
+            seq_group_metadata_list
+        ):
             seq_group = scheduled_seq_group.seq_group
             seq_group.update_num_computed_tokens(
                 scheduled_seq_group.token_chunk_size)
