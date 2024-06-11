@@ -23,7 +23,7 @@ from vllm.model_executor import SamplingMetadata
 from vllm.model_executor.model_loader import get_model
 from vllm.sampling_params import SamplingParams
 from vllm.sequence import (MultiModalData, SamplerOutput, SequenceData,
-                           SequenceGroupMetadata)
+                           SequenceGroupMetadata, SamplerPerformanceStatistics)
 from vllm.utils import (CudaMemoryProfiler, get_kv_cache_torch_dtype, is_hip,
                         is_pin_memory_available, make_tensor_with_pad)
 from vllm.attention import Attention
@@ -769,22 +769,21 @@ class ModelRunner:
         BENCHMARK_RUNNER = os.environ.get('BENCHMARK_RUNNER', '0') == '1'
         DISABLE_SAMPLING = os.environ.get('DISABLE_SAMPLING', '0') == '1'
         
-        if BENCHMARK_RUNNER:
-            t_start = time.time()
-            
-            start_prepare = torch.cuda.Event(enable_timing=True)
-            end_prepare = torch.cuda.Event(enable_timing=True)
-            
-            start_model = torch.cuda.Event(enable_timing=True)
-            end_model = torch.cuda.Event(enable_timing=True)
-            
-            start_sample = torch.cuda.Event(enable_timing=True)
-            end_sample = torch.cuda.Event(enable_timing=True)
+        t_start = time.time()
+        
+        start_prepare = torch.cuda.Event(enable_timing=True)
+        end_prepare = torch.cuda.Event(enable_timing=True)
+        
+        start_model = torch.cuda.Event(enable_timing=True)
+        end_model = torch.cuda.Event(enable_timing=True)
+        
+        start_sample = torch.cuda.Event(enable_timing=True)
+        end_sample = torch.cuda.Event(enable_timing=True)
         
         # if BENCHMARK_RUNNER:
         #     torch.cuda.synchronize()
         
-        if BENCHMARK_RUNNER: start_prepare.record()
+        start_prepare.record()
         (
             input_tokens,
             input_positions, 
@@ -798,12 +797,12 @@ class ModelRunner:
         if self.lora_config:
             self.set_active_loras(lora_requests, lora_mapping)
         
-        if BENCHMARK_RUNNER: end_prepare.record()
+        end_prepare.record()
         
         # if BENCHMARK_RUNNER:
         #     torch.cuda.synchronize()
 
-        if BENCHMARK_RUNNER: start_model.record()
+        start_model.record()
         # Execute the model.
         is_prompt = (attn_metadata is not None) and (attn_metadata.prefill_metadata is not None)
         
@@ -882,16 +881,15 @@ class ModelRunner:
                 if hasattr(v_cache, 'decode_end'):
                     v_cache.decode_end()
         
-        if BENCHMARK_RUNNER: end_model.record()
+        end_model.record()
 
         # Only perform sampling in the driver worker.
         if not self.is_driver_worker:
             return None
 
         # Sample the next token.
-        if BENCHMARK_RUNNER: 
-            t_sample = time.time()
-            start_sample.record()
+        t_sample = time.time()
+        start_sample.record()
         
         if DISABLE_SAMPLING:
             # NOTE(ain): faster alternative for temporary
@@ -966,17 +964,23 @@ class ModelRunner:
             )
         
         # print(output)
-        if BENCHMARK_RUNNER: 
-            t_sample = time.time() - t_sample
-            end_sample.record()
+        t_sample = time.time() - t_sample
+        end_sample.record()
+        
+        torch.cuda.synchronize() # NOTE: this should not not huge bottleneck, because sampler already cause the device sync.
+        elapsed_prepare = start_prepare.elapsed_time(end_prepare)
+        elapsed_model = start_model.elapsed_time(end_model)
+        elapsed_sample = start_sample.elapsed_time(end_sample)
+        elapsed_total = (time.time() - t_start) * 1000
+        
+        output.performance_statistics = SamplerPerformanceStatistics(
+            elapsed=elapsed_total,
+            elapsed_prepare=elapsed_prepare,
+            elapsed_model=elapsed_model,
+            elapsed_sampler=elapsed_sample,
+        )
         
         if BENCHMARK_RUNNER:
-            torch.cuda.synchronize()
-            elapsed_prepare = start_prepare.elapsed_time(end_prepare)
-            elapsed_model = start_model.elapsed_time(end_model)
-            elapsed_sample = start_sample.elapsed_time(end_sample)
-            elapsed_total = (time.time() - t_start) * 1000
-            
             if seq_group_metadata_list is not None:
                 # in main process
                 n_tokens = input_tokens.shape[0]

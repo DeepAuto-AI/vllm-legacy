@@ -211,8 +211,10 @@ class RequestOutputFactory:
     @staticmethod
     def create(seq_group):
         # Determine the type based on a condition, for example:
-        if hasattr(seq_group,
-                   'embeddings') and seq_group.embeddings is not None:
+        if (
+            hasattr(seq_group,'embeddings') \
+            and seq_group.embeddings is not None
+        ):
             return EmbeddingRequestOutput.from_seq_group(seq_group)
         else:
             return RequestOutput.from_seq_group(seq_group)

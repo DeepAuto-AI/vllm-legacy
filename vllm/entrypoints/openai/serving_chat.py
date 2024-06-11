@@ -18,8 +18,7 @@ from vllm.entrypoints.openai.protocol import (
     ChatCompletionLogProbs, ChatCompletionLogProbsContent,
     ChatCompletionMessageParam, ChatCompletionRequest, ChatCompletionResponse,
     ChatCompletionResponseChoice, ChatCompletionResponseStreamChoice,
-    ChatCompletionStreamResponse, ChatMessage, DeltaMessage, ErrorResponse,
-    UsageInfo)
+    ChatCompletionStreamResponse, ChatMessage, DeltaMessage, ErrorResponse, OpenAIBaseModel, UsageInfo)
 from vllm.entrypoints.openai.serving_engine import (LoRAModulePath,
                                                     OpenAIServing)
 from vllm.logger import init_logger
@@ -36,6 +35,8 @@ from .make_prompt import make_prompt
 
 logger = init_logger(__name__)
 
+def time_ms():
+    return time.time() * 1000
 
 @final  # So that it should be compatible with Dict[str, str]
 class ConversationMessage(TypedDict):
@@ -48,16 +49,58 @@ class ChatMessageParseResult:
     messages: List[ConversationMessage]
     is_multimodal: bool = False
 
+class CompletionPerformanceStatistics(OpenAIBaseModel):
+    # store when this statistics class created
+    statistics_created_at: float
+    # store when the request is recieved by serving module
+    request_created_at: float
+    # store the time interval between current engine response and last engine response
+    runner_last_latency: Optional[float] = None
+    # store the last latency measure of model latency
+    runner_last_model_latency: Optional[float] = None
+    # store the last latency measure of cuda graph prepare latency
+    runner_last_perpare_latency: Optional[float] = None
+    # store the last latency measure of sampler latency
+    runner_last_sampler_latency: Optional[float] = None
+    # estimated current request throughput (tok / sec)
+    request_throughput: Optional[float] = None
+    
+
+class ChatCompletionStreamResponseWithStatistics(ChatCompletionStreamResponse):
+    performance: Optional[CompletionPerformanceStatistics] = None
+
+class PerformanceTracker:
+    def __init__(self):
+        self.created_at = time_ms()
+    
+    def step(self, output: RequestOutput) -> CompletionPerformanceStatistics:
+        if output.metrics.last_runner_latency is not None and len(output.metrics.last_runner_latency) > 0:
+            return CompletionPerformanceStatistics(
+                statistics_created_at=time_ms(),
+                request_created_at=time_ms(),
+                runner_last_latency=output.metrics.last_runner_latency[-1],
+                runner_last_model_latency=output.metrics.last_runner_model_latency[-1],
+                runner_last_perpare_latency=output.metrics.last_runner_prepare_latency[-1],
+                runner_last_sampler_latency=output.metrics.last_runner_sampler_latency[-1],
+                request_throughput=1.0 / (output.metrics.last_runner_latency[-1] / 1000),
+            )
+        else:
+            return CompletionPerformanceStatistics(
+                statistics_created_at=time_ms(),
+                request_created_at=time_ms(),
+            )
 
 class OpenAIServingChat(OpenAIServing):
 
-    def __init__(self,
-                 engine: AsyncLLMEngine,
-                 model_config: ModelConfig,
-                 served_model_names: List[str],
-                 response_role: str,
-                 lora_modules: Optional[List[LoRAModulePath]] = None,
-                 chat_template: Optional[str] = None):
+    def __init__(
+        self,
+        engine: AsyncLLMEngine,
+        model_config: ModelConfig,
+        served_model_names: List[str],
+        response_role: str,
+        lora_modules: Optional[List[LoRAModulePath]] = None,
+        chat_template: Optional[str] = None
+    ):
         super().__init__(engine=engine,
                          model_config=model_config,
                          served_model_names=served_model_names,
@@ -301,6 +344,7 @@ class OpenAIServingChat(OpenAIServing):
         previous_texts = [""] * request.n
         previous_num_tokens = [0] * request.n
         finish_reason_sent = [False] * request.n
+        performance_tracker = PerformanceTracker()
         try:
             async for res in result_generator:
                 # We need to do it here, because if there are exceptions in
@@ -316,12 +360,13 @@ class OpenAIServingChat(OpenAIServing):
                             delta=DeltaMessage(role=role),
                             logprobs=None,
                             finish_reason=None)
-                        chunk = ChatCompletionStreamResponse(
+                        chunk = ChatCompletionStreamResponseWithStatistics(
                             id=request_id,
                             object=chunk_object_type,
                             created=created_time,
                             choices=[choice_data],
-                            model=model_name)
+                            model=model_name,
+                        )
                         data = chunk.model_dump_json(exclude_unset=True)
                         yield f"data: {data}\n\n"
 
@@ -342,18 +387,23 @@ class OpenAIServingChat(OpenAIServing):
                                         delta=DeltaMessage(
                                             content=last_msg_content),
                                         finish_reason=None))
-                                chunk = ChatCompletionStreamResponse(
+                                chunk = ChatCompletionStreamResponseWithStatistics(
                                     id=request_id,
                                     object=chunk_object_type,
                                     created=created_time,
                                     choices=[choice_data],
                                     logprobs=None,
-                                    model=model_name)
+                                    model=model_name,
+                                )
                                 data = chunk.model_dump_json(
                                     exclude_unset=True)
                                 yield f"data: {data}\n\n"
                     first_iteration = False
-
+                
+                performance_statistics = performance_tracker.step(output)
+                
+                print(performance_statistics)
+                
                 for output in res.outputs:
                     i = output.index
 
@@ -382,13 +432,16 @@ class OpenAIServingChat(OpenAIServing):
                             index=i,
                             delta=DeltaMessage(content=delta_text),
                             logprobs=logprobs,
-                            finish_reason=None)
-                        chunk = ChatCompletionStreamResponse(
+                            finish_reason=None
+                        )
+                        chunk = ChatCompletionStreamResponseWithStatistics(
                             id=request_id,
                             object=chunk_object_type,
                             created=created_time,
                             choices=[choice_data],
-                            model=model_name)
+                            model=model_name,
+                            performance=performance_statistics
+                        )
                         data = chunk.model_dump_json(exclude_unset=True)
                         yield f"data: {data}\n\n"
                     else:
@@ -406,12 +459,14 @@ class OpenAIServingChat(OpenAIServing):
                             logprobs=logprobs,
                             finish_reason=output.finish_reason,
                             stop_reason=output.stop_reason)
-                        chunk = ChatCompletionStreamResponse(
+                        chunk = ChatCompletionStreamResponseWithStatistics(
                             id=request_id,
                             object=chunk_object_type,
                             created=created_time,
                             choices=[choice_data],
-                            model=model_name)
+                            model=model_name,
+                            performance=performance_statistics
+                        )
                         if final_usage is not None:
                             chunk.usage = final_usage
                         data = chunk.model_dump_json(exclude_unset=True,
