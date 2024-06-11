@@ -61,7 +61,7 @@ class CompletionPerformanceStatistics(OpenAIBaseModel):
     # store the last latency measure of model latency
     runner_last_model_latency: Optional[float] = None
     # store the last latency measure of cuda graph prepare latency
-    runner_last_perpare_latency: Optional[float] = None
+    runner_last_prepare_latency: Optional[float] = None
     # store the last latency measure of sampler latency
     runner_last_sampler_latency: Optional[float] = None
     # estimated current request throughput (tok / sec)
@@ -86,7 +86,7 @@ class PerformanceTracker:
                 request_created_at=time_ms(),
                 runner_last_latency=output.metrics.last_runner_latency[-1],
                 runner_last_model_latency=output.metrics.last_runner_model_latency[-1],
-                runner_last_perpare_latency=output.metrics.last_runner_prepare_latency[-1],
+                runner_last_prepare_latency=output.metrics.last_runner_prepare_latency[-1],
                 runner_last_sampler_latency=output.metrics.last_runner_sampler_latency[-1],
                 request_throughput=(
                     (1.0 / (output.metrics.last_runner_latency[-1] / 1000))
