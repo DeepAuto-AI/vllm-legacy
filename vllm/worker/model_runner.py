@@ -973,6 +973,9 @@ class ModelRunner:
             elapsed_total = (time.time() - t_start) * 1000
             
             if seq_group_metadata_list is not None:
+                if 'LATENCY_PATH' in os. environ:
+                    with open(os.environ.get ('LATENCY_PATH'), 'a') as f:
+                        f.write(f"{elapsed_model},{elapsed_prepare + elapsed_sample}\n")
                 # in main process
                 n_tokens = input_tokens.shape[0]
                 elapsed_model_per_token = elapsed_model / n_tokens
