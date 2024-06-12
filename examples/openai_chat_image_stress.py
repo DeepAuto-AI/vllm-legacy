@@ -13,7 +13,7 @@ import threading
 import time
 from typing import Tuple, Optional
 import typer
-from openai import OpenAI
+from openai import OpenAI, APIConnectionError
 from typing_extensions import Annotated
 import queue
 from openai.types.chat import ChatCompletion
@@ -458,99 +458,102 @@ def thread_main(
         # Getting the base64 string
         time.sleep(random.random() * 5)
         
-        base64_image = _encode_image(image_file) if image_file is not None else None
+        try:
+            base64_image = _encode_image(image_file) if image_file is not None else None
 
-        client = OpenAI(
-            base_url=endpoint,
-            api_key=token,
-        )
-        
-        if base64_image is not None:
-            response = client.chat.completions.create(
-                model=model,
-                messages=[
-                    {
-                        "role": "system",
-                        "content": [
-                            {
-                                "type": "text",
-                                "text": SYS_PROMPT,
-                            }
-                        ]
-                    },
-                    {
-                        "role": "user",
-                        "content": [
-                            {
-                                "type": "image_url",
-                                "image_url": {
-                                    "url": f"data:image/jpeg;base64,{base64_image}",
-                                },
-                            },
-                            {
-                                "type": "text",
-                                "text": f"Here is one of wikipedia page that i found. \n```\n{CONTENT}\n```\n",
-                            },
-                            {
-                                "type": "text",
-                                "text": "Here we repeat the image"
-                            },
-                            {
-                                "type": "image_url",
-                                "image_url": {
-                                    "url": f"data:image/jpeg;base64,{base64_image}",
-                                },
-                            },
-                            {
-                                "type": "text",
-                                "text": "Is wikipedia page that I just found is related to image content? If yes, then describe about image, if no, then describe the reason why, and what should I do now.",
-                            },
-                        ],
-                    }
-                ],
-                temperature=0.7,
-                top_p=0.9,
-                n=num_seqs,
-                max_tokens=2048,
+            client = OpenAI(
+                base_url=endpoint,
+                api_key=token,
             )
-        else:
-            response = client.chat.completions.create(
-                model=model,
-                messages=[
-                    {
-                        "role": "system",
-                        "content": [
-                            {
-                                "type": "text",
-                                "text": SYS_PROMPT,
-                            }
-                        ]
-                    },
-                    {
-                        "role": "user",
-                        "content": [
-                            {
-                                "type": "text",
-                                "text": f"Here is one of wikipedia page that i found. \n```\n{CONTENT}\n```\n",
-                            },
-                            {
-                                "type": "text",
-                                "text": f"Here is another wikipedia page that i found. \n```\n{CONTENT_TREE}\n```\n",
-                            },
-                            {
-                                "type": "text",
-                                "text": "What is similarity and difference between two document? Describe every precisely with examples and summary both documents.",
-                            },
-                        ],
-                    }
-                ],
-                temperature=0.7,
-                top_p=0.9,
-                n=num_seqs,
-                max_tokens=2048,
-            )
-        
-        result_queue.put((thread_id, response))
+            
+            if base64_image is not None:
+                response = client.chat.completions.create(
+                    model=model,
+                    messages=[
+                        {
+                            "role": "system",
+                            "content": [
+                                {
+                                    "type": "text",
+                                    "text": SYS_PROMPT,
+                                }
+                            ]
+                        },
+                        {
+                            "role": "user",
+                            "content": [
+                                {
+                                    "type": "image_url",
+                                    "image_url": {
+                                        "url": f"data:image/jpeg;base64,{base64_image}",
+                                    },
+                                },
+                                {
+                                    "type": "text",
+                                    "text": f"Here is one of wikipedia page that i found. \n```\n{CONTENT}\n```\n",
+                                },
+                                {
+                                    "type": "text",
+                                    "text": "Here we repeat the image"
+                                },
+                                {
+                                    "type": "image_url",
+                                    "image_url": {
+                                        "url": f"data:image/jpeg;base64,{base64_image}",
+                                    },
+                                },
+                                {
+                                    "type": "text",
+                                    "text": "Is wikipedia page that I just found is related to image content? If yes, then describe about image, if no, then describe the reason why, and what should I do now.",
+                                },
+                            ],
+                        }
+                    ],
+                    temperature=0.7,
+                    top_p=0.9,
+                    n=num_seqs,
+                    max_tokens=2048,
+                )
+            else:
+                response = client.chat.completions.create(
+                    model=model,
+                    messages=[
+                        {
+                            "role": "system",
+                            "content": [
+                                {
+                                    "type": "text",
+                                    "text": SYS_PROMPT,
+                                }
+                            ]
+                        },
+                        {
+                            "role": "user",
+                            "content": [
+                                {
+                                    "type": "text",
+                                    "text": f"Here is one of wikipedia page that i found. \n```\n{CONTENT}\n```\n",
+                                },
+                                {
+                                    "type": "text",
+                                    "text": f"Here is another wikipedia page that i found. \n```\n{CONTENT_TREE}\n```\n",
+                                },
+                                {
+                                    "type": "text",
+                                    "text": "What is similarity and difference between two document? Describe every precisely with examples and summary both documents.",
+                                },
+                            ],
+                        }
+                    ],
+                    temperature=0.7,
+                    top_p=0.9,
+                    n=num_seqs,
+                    max_tokens=2048,
+                )
+            
+            result_queue.put((thread_id, response))
+        except APIConnectionError as ex:
+            print('connection error retry...')
 
 @app.command()
 def chat(
