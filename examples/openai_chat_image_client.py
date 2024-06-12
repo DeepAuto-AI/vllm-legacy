@@ -334,11 +334,7 @@ def chat(
                     },
                     {
                         "type": "text",
-                        "text": f"Here is one of wikipedia page that i found. \n```\n{CONTENT}\n```\n",
-                    },
-                    {
-                        "type": "text",
-                        "text": "Is wikipedia page that I just found is related to image content? If yes, then describe about image, if no, then describe the reason why, and what should I do now.",
+                        "text": f"What is this?",
                     },
                 ],
             }

@@ -1,5 +1,6 @@
 import base64
 import codecs
+import os
 import time
 from dataclasses import dataclass
 import traceback
@@ -32,7 +33,7 @@ from PIL import Image
 import re
 import io
 
-from .make_prompt import make_prompt
+from .make_prompt import convert_prompt, RE_TGI_IMAGE_MARKDOWN
 
 logger = init_logger(__name__)
 
@@ -179,9 +180,14 @@ class OpenAIServingChat(OpenAIServing):
 
             for msg in request.messages:
                 parsed_msg = self._parse_chat_message_content(msg)
+                if isinstance(msg['content'], str) and re.search(RE_TGI_IMAGE_MARKDOWN, msg['content']) is not None:
+                    is_multimodal = True
                 is_multimodal = is_multimodal or parsed_msg.is_multimodal
                 conversation.extend(parsed_msg.messages)
-            
+
+            # Convert Chat UI format to OpenAI format
+            conversation = convert_prompt(conversation)
+
             if is_multimodal:
                 # convert conversation texts: List[str] to texts: str
                 for message in conversation:
@@ -205,7 +211,7 @@ class OpenAIServingChat(OpenAIServing):
                         raise Exception(f'unknown message content type {type(message["content"])}')
                     
                     assert isinstance(message['content'], str), 'every content before chat template should be string'
-            
+
             prompt = self.tokenizer.apply_chat_template(
                 conversation=conversation,
                 tokenize=False,
