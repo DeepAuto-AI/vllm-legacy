@@ -55,7 +55,7 @@ if response.status_code == 200:
                     line = line[5:]
                     data = json.loads(line.strip())
                     if 'choices' in data and len(data['choices']) > 0 and 'delta' in data['choices'][0] and 'content' in data['choices'][0]['delta']:
-                        print(data['choices'][0]['delta']['content'], end='', flush=True)
+                        print(data['choices'][0]['delta']['content'], end='|', flush=True)
                         if data['performance']['is_prompt']:
                             prompt_throughput = data['performance']['request_throughput']
                         else:
@@ -65,7 +65,9 @@ if response.status_code == 200:
                 else:
                     print()
                     print(line.strip())
-    print('prompt throughput', prompt_throughput)
-    print('decode throughput', sum(throughputs) / len(throughputs))
+    
+    if show_text:
+        print('prompt throughput', prompt_throughput)
+        print('decode throughput', sum(throughputs) / len(throughputs))
 else:
     print("Request failed with status code: ", response.status_code)
