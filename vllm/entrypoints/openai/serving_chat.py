@@ -83,7 +83,7 @@ class PerformanceTracker:
         if output.metrics.last_runner_latency is not None and len(output.metrics.last_runner_latency) > 0:
             return CompletionPerformanceStatistics(
                 statistics_created_at=time_ms(),
-                request_created_at=time_ms(),
+                request_created_at=self.created_at,
                 runner_last_latency=output.metrics.last_runner_latency[-1],
                 runner_last_model_latency=output.metrics.last_runner_model_latency[-1],
                 runner_last_prepare_latency=output.metrics.last_runner_prepare_latency[-1],
@@ -99,7 +99,7 @@ class PerformanceTracker:
         else:
             return CompletionPerformanceStatistics(
                 statistics_created_at=time_ms(),
-                request_created_at=time_ms(),
+                request_created_at=self.created_at,
                 is_prompt=first_iteration,
             )
 
