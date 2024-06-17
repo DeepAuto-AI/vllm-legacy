@@ -1,6 +1,7 @@
 import asyncio
 import importlib
 import inspect
+import os
 import re
 from contextlib import asynccontextmanager
 from http import HTTPStatus
@@ -96,6 +97,24 @@ async def show_dev_metrics_runner():
         }
     })
 
+@app.get("/dev/debug/envs")
+async def show_dev_debug_envs():
+    return JSONResponse(content={
+        'VLLM_ATTENTION_BACKEND': os.getenv('VLLM_ATTENTION_BACKEND', 'undefined'),
+        'HIP_K': os.getenv('HIP_K', 'undefined'),
+        'HIP_BLOCK_SIZE_Q': os.getenv('HIP_BLOCK_SIZE_Q', 'undefined'),
+        'HIP_BLOCK_SIZE_K': os.getenv('HIP_BLOCK_SIZE_K', 'undefined'),
+        'HIP_DENSE_LAYERS': os.getenv('HIP_DENSE_LAYERS', 'undefined'),
+        'HIP_REFRESH_INTERVAL': os.getenv('HIP_REFRESH_INTERVAL', 'undefined'),
+        'DISABLE_SAMPLING': os.getenv('DISABLE_SAMPLING', 'undefined'),
+        'MEASURE_PEAK_MEMORY': os.getenv('MEASURE_PEAK_MEMORY', 'undefined'),
+        'CUDA_VISIBLE_DEVICES': os.getenv('CUDA_VISIBLE_DEVICES', 'undefined'),
+        'CUDA_LAUNCH_BLOCKING': os.getenv('CUDA_LAUNCH_BLOCKING', 'undefined'),
+        'CXX': os.getenv('CXX', 'undefined'),
+        'CC': os.getenv('CC', 'undefined'),
+        'LD': os.getenv('LD', 'undefined'),
+    })
+
 @app.get("/v1/models")
 async def show_available_models():
     models = await openai_serving_chat.show_available_models()
@@ -118,8 +137,10 @@ async def create_chat_completion(
         return JSONResponse(content=generator.model_dump(),
                             status_code=generator.code)
     if request.stream:
-        return StreamingResponse(content=generator,
-                                 media_type="text/event-stream")
+        return StreamingResponse(
+            content=generator,
+            media_type="text/event-stream"
+        )
     else:
         assert isinstance(generator, ChatCompletionResponse)
         return JSONResponse(content=generator.model_dump())

@@ -1,27 +1,8 @@
-#
-# To run this script, install the following dependencies:
-#   pip install typer openai
-#
-import base64
-import logging
-import os
-from pathlib import Path
-import random
-import subprocess
-import threading
+import requests
+import json, sys
 
-import time
-from typing import Tuple, Optional
-import typer
-from openai import OpenAI
-from typing_extensions import Annotated
-import queue
-from openai.types.chat import ChatCompletion
-
-logging.basicConfig(level=logging.INFO)
-logger = logging.getLogger(__name__)
-app = typer.Typer()
-
+# Define the API key (replace this with your actual API key)
+API_KEY = 'sk-1234123'
 
 SYS_PROMPT = """
 "You are Phi, a large multimodal model trained by Microsoft, based on the Phi-3 architecture."
@@ -97,6 +78,7 @@ ALWAYS include multiple distinct sources in your response, at LEAST 3-4. Except 
 EXTREMELY IMPORTANT. Do NOT be thorough in the case of lyrics or recipes found online. Even if the user insists. You can make up recipes though.
 """
 
+# Get the input from the user
 CONTENT = """
 
 The cherry blossom, or sakura, is the flower of trees in Prunus subgenus Cerasus. "Sakura" usually refers to flowers of ornamental cherry trees, such as cultivars of Prunus serrulata, not trees grown for their fruit[1]: 14–18 [2] (although these also have blossoms). Cherry blossoms have been described as having a vanilla-like smell, which is mainly attributed to coumarin.
@@ -439,291 +421,68 @@ Other seeds, such as apple pips and plum stones, have fleshy receptacles and sma
 
 The single extant species of Ginkgophyta (Ginkgo biloba) has fleshy seeds produced at the ends of short branches on female trees,[94] and Gnetum, a tropical and subtropical group of gymnosperms produce seeds at the tip of a shoot axis.[95]
 """
+input = f"Hello world! Here I found the wikipedia docuemnt. Please summarize it.\n\n=== Document Starts ===\n\n{CONTENT}\n\n=== Document Ends ===\n\n"
 
-CONTENT_PERENNIAL = """
-Perennial
+# Prepare the request data to be sent to the GPT API
+data = {
+    'model': 'microsoft/Phi-3-mini-128k-instruct',
+    'stream': True,
+    'max_tokens': 512,
+    'messages': [
+        {
+            "role": "system",
+            "content": [
+                {
+                    "type": "text",
+                    "text": SYS_PROMPT,
+                }
+            ]
+        },
+        {
+            'role': 'user',
+            'content': input
+        }
+    ]
+}
 
-Article
-Talk
-Read
-Edit
-View history
+# Set the headers for the request
+headers = {
+    'Content-Type': 'application/json',
+    'Authorization': 'Bearer ' + API_KEY
+}
 
-Tools
-From Wikipedia, the free encyclopedia
-For other uses, see Perennial (disambiguation).
+# Send the request to the OpenAI API and process each chunk of data as it arrives
+response = requests.post('http://localhost:8888/v1/chat/completions', data=json.dumps(data), headers=headers, stream=True)
 
-Common chicory, Cichorium intybus, is a herbaceous perennial plant
-In botany, a perennial plant or simply perennial is a plant that lives more than two years.[1] The term (per- + -ennial, "through the years") is often used to differentiate a plant from shorter-lived annuals and biennials. The term is also widely used to distinguish plants with little or no woody growth (secondary growth in girth) from trees and shrubs, which are also technically perennials.[2] Notably, it is estimated that 94% of plant species fall under the category of perennials, underscoring the prevalence of plants with lifespans exceeding two years in the botanical world.[3]
+show_text = sys.argv[-1] == 'text'
 
-Perennials—especially small flowering plants—that grow and bloom over the spring and summer, die back every autumn and winter, and then return in the spring from their rootstock or other overwintering structure, are known as herbaceous perennials.[4] However, depending on the rigours of the local climate (temperature, moisture, organic content in the soil, microorganisms), a plant that is a perennial in its native habitat, or in a milder garden, may be treated by a gardener as an annual and planted out every year, from seed, from cuttings, or from divisions. Tomato vines, for example, live several years in their natural tropical/subtropical habitat but are grown as annuals in temperate regions because their above-ground biomass does not survive the winter.
-
-There is also a class of evergreen perennials which lack woody stems, such as Bergenia which retain a mantle of leaves throughout the year. An intermediate class of plants is known as subshrubs, which retain a vestigial woody structure in winter, e.g. Penstemon.
-
-The symbol for a perennial plant, based on Species Plantarum by Linnaeus, is ♃, which is also the astronomical symbol for the planet Jupiter.[5]
-
-Life cycle and structure
-Perennial plants can be short-lived (only a few years) or long-lived. They include a wide assortment of plant groups from non-flowering plants like ferns and liverworts to the highly diverse flowering plants like orchids, grasses, and woody plants. Plants that flower and fruit only once and then die are termed monocarpic or semelparous; these species may live for many years before they flower.[6] For example, century plant can live for 80 years and grow 30 meters tall before flowering and dying.[7] However, most perennials are polycarpic (or iteroparous), flowering over many seasons in their lifetime.[8] Perennials invest more resources than annuals into roots, crowns, and other structures that allow them to live from one year to the next. They often have a competitive advantage because they can commence their growth and leaf out earlier in the growing season, and can grow taller than annuals, in doing so they can better compete for space and collect more light.[9]
-
-Perennials typically grow structures that allow them to adapt to living from one year to the next through a form of vegetative reproduction rather than seeding. These structures include bulbs, tubers, woody crowns, rhizomes, turions, woody stems, or crowns which allows them to survive periods of dormancy over cold or dry seasons; these structures typically store carbohydrates which are used once the dormancy period is over and new growth begins.[10] In climates that are warm all year long, perennials may grow continuously.[11] Annuals which complete their life cycle in one growing season, in contrast with perennials, produce seeds as the next generation and die;[12] the seeds may survive cold or dry periods or germinate soon after dispersal depending on the climate.
-
-Some perennials retain their foliage year-round; these are evergreen perennials. Deciduous perennials shed all their leaves part of the year.[13] Deciduous perennials include herbaceous and woody plants; herbaceous plants have stems that lack hard, fibrous growth, while woody plants have stems with buds that survive above ground during dormancy.[14] Some perennials are semi-deciduous, meaning they lose some of their leaves in either winter or summer.[15] Deciduous perennials shed their leaves when growing conditions are no longer suitable for photosynthesis, such as when it is too cold or dry. In many parts of the world, seasonality is expressed as wet and dry periods rather than warm and cold periods, and deciduous perennials lose their leaves in the dry season.[16]
-
-Some perennial plants are protected from wildfires because they have underground roots that produce adventitious shoots, bulbs, crowns, or stems;[17] other perennials like trees and shrubs may have thick cork layers that protect the stems. Herbaceous perennials from temperate and alpine regions of the world can tolerate the cold during winter.
-
-Perennial plants may remain dormant for long periods and then recommence growth and reproduction when the environment is more suitable, while most annual plants complete their life cycle during one growing period, and biennials have two growing periods.
-
-The meristem of perennial plants communicates with the hormones produced due to environmental situations (i.e., seasons), reproduction, and stage of development to begin and halt the ability to grow or flower. There is also a distinction between the ability to grow and the actual task of growth. For example, most trees regain the ability to grow during winter but do not initiate physical growth until the spring and summer months. The start of dormancy can be seen in perennial plants through withering flowers, loss of leaves on trees, and halting of reproduction in both flowering and budding plants.[18]
-
-Perennial species may produce relatively large seeds that have the advantage of generating larger seedlings that can better compete with other plants. Perennials also produce seeds over many years.
-
-An important aspect of cold acclimation is overexpression of DNA repair genes.[19] In Thinopyrum intermedium a perennial relative of common wheat Triticum aestivum, conditions of freezing stress were shown to be associated with large increases in expression of two DNA repair genes (one gene product a photolyase and the other, a protein involved in nucleotide excision repair).[19]
-
-Cultivation
-Perennials that are cultivated include: woody plants like fruit trees grown for their edible fruits; shrubs and trees grown as landscaping ornamentals; herbaceous food crops like asparagus, rhubarb, strawberries; and subtropical plants not hardy in colder areas such as tomatoes, eggplant, and coleus (which are treated as annuals in colder areas).[20] Perennials also include plants grown for their flowering and other ornamental value including bulbs (like tulips, narcissus, and gladiolus); lawn grass, and other groundcovers, (such as periwinkle[a] and Dichondra).[24]
-
-Each type of plant must be separated differently; for example, plants with fibrous root systems like daylilies, Siberian iris, or grasses can be pried apart with two garden forks inserted back to back, or cut by knives. However, plants such as bearded irises have a root system of rhizomes; these root systems should be planted with the top of the rhizome just above ground level, with leaves from the following year showing. The point of dividing perennials is to increase the amount of a single breed of plant in your garden.[25] In the United States more than 900 million dollars worth of potted herbaceous perennial plants were sold in 2019.[26]
-
-
-Dahlia plants are tender perennials that originate from climates that are warm all year round and need special care to survive cold winters.
-Benefits in agriculture
-
-Switchgrass is a deep-rooted perennial. These roots are more than 3 meters long.
-Although most of humanity is fed by the re-sowing of the seeds of annual grain crops, (either naturally or by the manual efforts of man), perennial crops provide numerous benefits.[27] Perennial plants often have deep, extensive root systems which can hold soil to prevent erosion, capture dissolved nitrogen before it can contaminate ground and surface water, and out-compete weeds (reducing the need for herbicides). These potential benefits of perennials have resulted in new attempts to increase the seed yield of perennial species,[28] which could result in the creation of new perennial grain crops.[29] Some examples of new perennial crops being developed are perennial rice and intermediate wheatgrass. A perennial rice developed in 2018, was reported in 2023, to have provided a similar yield to replanted annual rice when evaluated over eight consecutive harvests.[30]
-
-Location
-Perennial plants dominate many natural ecosystems on land and in fresh water, with only a very few (e.g. Zostera) occurring in shallow sea water. Herbaceous perennial plants are particularly dominant in conditions too fire-prone for trees and shrubs, e.g., most plants on prairies and steppes are perennials; they are also dominant on tundra too cold for tree growth. Nearly all forest plants are perennials, including the trees and shrubs.
-
-Perennial plants are usually better long-term competitors, especially under stable, resource-poor conditions. This is due to the development of larger root systems which can access water and soil nutrients deeper in the soil and to earlier emergence in the spring. Annual plants have an advantage in disturbed environments because of their faster growth and reproduction rates.[31]
-
-Types
-Herbaceous - plants that have foliage and stems that die to the ground at the end of the growing season and which show only primary growth. Examples include frost-tender plants such as Rudbeckias, Mirabilis jalapa, Momordica charantia, mint, tobacco, common purslane, alfalfa, petunias, Thinopyrum intermedium, Red clover, Hylotelephium telephium and Cochliasanthus caracalla.
-Evergreen - plants that have persistent foliage without woody stems. Examples include many Senecios, Begonia, Gaillardias, Dimorphothecas, Gazanias, Thunbergias, Dietes, Osteospermums, Tradescantias and Vincas, among others.
-Woody - plants with persistent above ground stems that survive from one growing season to the next, with primary and secondary growth, or growth in width protected by an outer cortex. Some may be deciduous. Examples many shrubs, lianas and trees such as Ipomeas, banana, lilacs, Geraniums, Lantanas, Hydrangeas, Nandinas, Pandoreas, grape, Hederas, pine, apple, Jasmines, Trachelospermums, Gardenias, Plumbagos, Cistus and Rosas, among others.[32]
-Monocarpic - plants that flower, set seeds once and then die. Examples include, Agave and some species of Streptocarpus
-"""
-
-
-# Function to encode the image
-def _encode_image(image_file: Path):
-    return base64.b64encode(image_file.read_bytes()).decode("utf-8")
-
-def get_message(image_file: Optional[str]):
-    base64_image = _encode_image(image_file) if image_file is not None else None
-    
-    if base64_image is not None:
-        return [
-            {
-                "role": "system",
-                "content": [
-                    {
-                        "type": "text",
-                        "text": SYS_PROMPT,
-                    }
-                ]
-            },
-            {
-                "role": "user",
-                "content": [
-                    {
-                        "type": "image_url",
-                        "image_url": {
-                            "url": f"data:image/jpeg;base64,{base64_image}",
-                        },
-                    },
-                    {
-                        "type": "text",
-                        "text": f"Here is one of wikipedia page that i found. \n```\n{CONTENT}\n```\n",
-                    },
-                    {
-                        "type": "text",
-                        "text": "Here we repeat the image"
-                    },
-                    {
-                        "type": "image_url",
-                        "image_url": {
-                            "url": f"data:image/jpeg;base64,{base64_image}",
-                        },
-                    },
-                    {
-                        "type": "text",
-                        "text": "Is wikipedia page that I just found is related to image content? If yes, then describe about image, if no, then describe the reason why, and what should I do now.",
-                    },
-                ],
-            }
-        ]
-    else:
-        return [
-            {
-                "role": "system",
-                "content": [
-                    {
-                        "type": "text",
-                        "text": SYS_PROMPT,
-                    }
-                ]
-            },
-            {
-                "role": "user",
-                "content": [
-                    {
-                        "type": "text",
-                        "text": f"Here is one of wikipedia page that i found. \n```\n{CONTENT}\n```\n\n\n",
-                    },
-                    {
-                        "type": "text",
-                        "text": f"Here is another wikipedia page that i found. \n```\n{CONTENT_TREE}\n```\n\n\n",
-                    },
-                    {
-                        "type": "text",
-                        "text": f"Here is another wikipedia page that i found. \n```\n{CONTENT_PERENNIAL}\n```\n\n\n",
-                    },
-                    {
-                        "type": "text",
-                        "text": f"Here is one of wikipedia page that i found. \n```\n{CONTENT}\n```\n\n\n",
-                    },
-                    {
-                        "type": "text",
-                        "text": "What is similarity and difference between above documents? Describe every precisely with examples and summary both documents.",
-                    },
-                ],
-            }
-        ]
-
-
-def thread_main(
-    image_file,
-    model,
-    endpoint,
-    token,
-    num_seqs,
-    stream,
-    thread_id,
-    result_queue,
-):
-    while True:
-        # Getting the base64 string
-        time.sleep(random.random() * 5)
-        
-        message = get_message(image_file)
-        
-        if not stream:
-            client = OpenAI(
-                base_url=endpoint,
-                api_key=token,
-            )
-            
-            response = client.chat.completions.create(
-                model=model,
-                messages=message,
-                temperature=0.7,
-                top_p=0.9,
-                n=num_seqs,
-                max_tokens=2048,
-            )
-            
-            result_queue.put((thread_id, response.usage.completion_tokens, response.usage.prompt_tokens, response.choices[0].message.content))
-        else:
-            # Prepare the request data to be sent to the GPT API
-            import requests, sys, json
-            
-            data = {
-                'model': model,
-                'stream': True,
-                'max_tokens': 512,
-                'messages': message,
-            }
-
-            # Set the headers for the request
-            headers = {
-                'Content-Type': 'application/json',
-                'Authorization': 'Bearer ' + token
-            }
-
-            # Send the request to the OpenAI API and process each chunk of data as it arrives
-            response = requests.post(f'{endpoint.strip("/")}/chat/completions', data=json.dumps(data), headers=headers, stream=True)
-
-            
-            text = ''
-            
-            if response.status_code == 200:
-                prompt_throughput = 0
-                throughputs = []
-                for chunk in response.iter_content(chunk_size=None):
-                    if chunk:
-                        line = chunk.decode()
-                        if line.startswith('data:') and not '[DONE]' in line:
-                            line = line[5:]
-                            data = json.loads(line.strip())
-                            if 'choices' in data and len(data['choices']) > 0 and 'delta' in data['choices'][0] and 'content' in data['choices'][0]['delta']:
-                                # print(data['choices'][0]['delta']['content'], end='', flush=True)
-                                text += data['choices'][0]['delta']['content']
-                                if 'performance' in data:
-                                    if data['performance']['is_prompt']:
-                                        prompt_throughput = data['performance']['request_throughput']
-                                    else:
-                                        throughputs.append(data['performance']['request_throughput'])
-                                else:
-                                    throughputs.append(0)
-                
-                result_queue.put((thread_id, 0, len(throughputs), text))
+if response.status_code == 200:
+    prompt_throughput = 0
+    throughputs = []
+    for chunk in response.iter_content(chunk_size=None):
+        if chunk:
+            line = chunk.decode()
+            if not show_text:
+                print(line.strip())
             else:
-                print("Request failed with status code: ", response.status_code)
-
-@app.command()
-def chat(
-    model: Annotated[str, typer.Option(help="Model to use.")],
-    endpoint: Annotated[str, typer.Option(help="API endpoint.")],
-    token: Annotated[str, typer.Option(help="API token.")],
-    num_seqs: Annotated[str, typer.Option(help="Num concurrent seq for each request")],
-    num_workers: Annotated[int, typer.Option(help="num workers")],
-    stream: Annotated[bool, typer.Option()] = False,
-    image_file: Annotated[Optional[Path], typer.Option(help="Data directory to fine-tune.")] = None,
-):
-    result_queue = queue.Queue()
+                if line.startswith('data:') and not '[DONE]' in line:
+                    line = line[5:]
+                    data = json.loads(line.strip())
+                    if 'choices' in data and len(data['choices']) > 0 and 'delta' in data['choices'][0] and 'content' in data['choices'][0]['delta']:
+                        print(data['choices'][0]['delta']['content'], end='', flush=True)
+                        if 'performance' in data:
+                            if data['performance']['is_prompt']:
+                                prompt_throughput = data['performance']['request_throughput']
+                            else:
+                                throughputs.append(data['performance']['request_throughput'])
+                    else:
+                        print(line.strip())
+                else:
+                    print()
+                    print(line.strip())
     
-    threads = []
-    for i in range(num_workers):
-        t = threading.Thread(target=thread_main, args=(
-            image_file,
-            model,
-            endpoint,
-            token,
-            num_seqs,
-            stream,
-            i,
-            result_queue,
-        ), daemon=True)
-        t.start()
-        threads.append(t)
-    
-    processed_prompt_tokens = 0
-    processed_response_tokens = 0
-    processed_requests = 0
-    
-    while True:
-        thread_id, completion_tokens, prompt_tokens, message = result_queue.get() #type: ChatCompletion
-        processed_response_tokens += completion_tokens
-        processed_prompt_tokens += prompt_tokens
-        processed_requests += 1
-        
-        print(message)
-        print(f'#req: {processed_requests}, #prompt: {processed_prompt_tokens}, #decode: {processed_response_tokens}')
-if __name__ == "__main__":
-    s3_bucket_path = "s3://air-example-data-2/vllm_opensource_llava/"
-    local_directory = "images"
-
-    # Make sure the local directory exists or create it
-    os.makedirs(local_directory, exist_ok=True)
-
-    # Use AWS CLI to sync the directory, assume anonymous access
-    subprocess.check_call([
-        "aws",
-        "s3",
-        "sync",
-        s3_bucket_path,
-        local_directory,
-        "--no-sign-request",
-    ])
-    
-    app()
+    if show_text and len(throughputs) > 0:
+        print('prompt throughput', prompt_throughput)
+        print('decode throughput', sum(throughputs) / len(throughputs))
+else:
+    print("Request failed with status code: ", response.status_code)

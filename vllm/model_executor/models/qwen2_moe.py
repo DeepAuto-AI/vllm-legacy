@@ -22,6 +22,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 """Inference-only Qwen2MoE model compatible with HuggingFace weights."""
+import os
 from typing import Any, Dict, Iterable, List, Optional, Tuple
 
 import torch
@@ -190,6 +191,7 @@ class Qwen2MoeAttention(nn.Module):
         max_position_embeddings: int = 8192,
         cache_config: Optional[CacheConfig] = None,
         quant_config: Optional[QuantizationConfig] = None,
+        layer_index: Optional[int] = None,
     ) -> None:
         super().__init__()
         self.hidden_size = hidden_size
@@ -237,12 +239,16 @@ class Qwen2MoeAttention(nn.Module):
             base=rope_theta,
             rope_scaling=rope_scaling,
         )
-        self.attn = Attention(self.num_heads,
-                              self.head_dim,
-                              self.scaling,
-                              num_kv_heads=self.num_kv_heads,
-                              cache_config=cache_config,
-                              quant_config=quant_config)
+        self.attn = Attention(
+            self.num_heads,
+            self.head_dim,
+            self.scaling,
+            num_kv_heads=self.num_kv_heads,
+            cache_config=cache_config,
+            quant_config=quant_config,
+            layer_index=layer_index,
+        )
+        self.rope_method = os.getenv('HIP_ROPE_METHOD', 'none')
 
     def forward(
         self,
@@ -251,10 +257,33 @@ class Qwen2MoeAttention(nn.Module):
         kv_cache: torch.Tensor,
         attn_metadata: AttentionMetadata,
     ) -> torch.Tensor:
+        # qkv, _ = self.qkv_proj(hidden_states)
+        # q, k, v = qkv.split([self.q_size, self.kv_size, self.kv_size], dim=-1)
+        # q, k = self.rotary_emb(positions, q, k)
+        # attn_output = self.attn(q, k, v, kv_cache, attn_metadata)
+        # output, _ = self.o_proj(attn_output)
+        # return output
+    
         qkv, _ = self.qkv_proj(hidden_states)
         q, k, v = qkv.split([self.q_size, self.kv_size, self.kv_size], dim=-1)
-        q, k = self.rotary_emb(positions, q, k)
-        attn_output = self.attn(q, k, v, kv_cache, attn_metadata)
+        
+        if self.rope_method == 'none':
+            q, k = self.rotary_emb(positions, q, k)
+            attn_output = self.attn(q, k, v, kv_cache, attn_metadata, rope_method=self.rope_method)
+        elif self.rope_method == 'self_extend':
+            cos, sin = self.rotary_emb.get_cos_sin_cache()
+            position_ids = positions
+            attn_output = self.attn(
+                q, k, v, kv_cache, attn_metadata,
+                
+                rope_method=self.rope_method,
+                rope_cos=cos,
+                rope_sin=sin,
+                position_ids=position_ids,
+            )
+        else:
+            raise Exception()
+        
         output, _ = self.o_proj(attn_output)
         return output
 
@@ -283,6 +312,7 @@ class Qwen2MoeDecoderLayer(nn.Module):
             max_position_embeddings=max_position_embeddings,
             cache_config=cache_config,
             quant_config=quant_config,
+            layer_index=layer_idx,
         )
         if (layer_idx not in config.mlp_only_layers) and (
                 config.num_experts > 0 and

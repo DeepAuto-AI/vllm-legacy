@@ -97,6 +97,11 @@ class RequestMetrics:
     first_token_time: Optional[float]
     time_in_queue: Optional[float]
     finished_time: Optional[float] = None
+    
+    last_runner_latency: Optional[List[float]] = None
+    last_runner_prepare_latency: Optional[List[float]] = None
+    last_runner_model_latency: Optional[List[float]] = None
+    last_runner_sampler_latency: Optional[List[float]] = None
 
 
 class SequenceData:
@@ -789,6 +794,12 @@ class EmbeddingSequenceGroupOutput(SequenceGroupOutput):
             raise NotImplementedError()
         return self.embeddings == other.embeddings
 
+@dataclass
+class SamplerPerformanceStatistics:
+    elapsed: float
+    elapsed_prepare: float
+    elapsed_model: float
+    elapsed_sampler: float
 
 @dataclass
 class SamplerOutput:
@@ -812,6 +823,8 @@ class SamplerOutput:
 
     # Spec decode metrics populated by workers.
     spec_decode_worker_metrics: Optional["SpecDecodeWorkerMetrics"] = None
+    
+    performance_statistics: Optional[SamplerPerformanceStatistics] = None
 
     def __getitem__(self, idx: int):
         return self.outputs[idx]
@@ -837,7 +850,8 @@ class SamplerOutput:
             f"SamplerOutput(outputs={self.outputs}, "
             f"sampled_token_probs={sampled_token_probs_repr}, "
             f"sampled_token_ids={sampled_token_ids_repr}, "
-            f"spec_decode_worker_metrics={self.spec_decode_worker_metrics})")
+            f"spec_decode_worker_metrics={self.spec_decode_worker_metrics}, "
+            f"performance_statistics={self.performance_statistics})")
 
 
 @dataclass

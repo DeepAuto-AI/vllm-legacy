@@ -22,129 +22,15 @@ from vllm.attention.backends.abstract import (
     AttentionImpl,
     AttentionMetadata
 )
+from vllm.attention.backends.xformers import (XFormersMetadata)
 from vllm.attention.ops.paged_attn import (
     PagedAttention
 )
-from timber import paged_timber_attention, timber_attention
+from hip import paged_hip_attention, hip_attention
 
 @dataclass
-class HiPAttentionMetadata(AttentionMetadata, PagedAttentionMetadata):
-    """Metadata for XFormersbackend.
-
-    NOTE: Any python object stored here is not updated when it is
-    cuda-graph replayed. If you have values that need to be changed
-    dynamically, it should be stored in tensor. The tensor has to be
-    updated from `CUDAGraphRunner.forward` API.
-    """
-    # (batch_size,). The sequence length per sequence. Sequence length means
-    # the computed tokens + new tokens None if it is a decoding.
-    seq_lens: Optional[List[int]]
-    # seq_lens stored as a tensor.
-    seq_lens_tensor: Optional[torch.Tensor]
-
-    # |---------- N-1 iteration --------|
-    # |---------------- N iteration ---------------------|
-    # |- tokenA -|......................|-- newTokens ---|
-    # |---------- context_len ----------|
-    # |-------------------- seq_len ----------------------|
-    #                                   |-- query_len ---|
-
-    # Maximum query length in the batch. None for decoding.
-    max_query_len: Optional[int]
-    # FIXME: It is for flash attn.
-    # Maximum sequence length among prefill batch. 0 if there are decoding
-    # requests only.
-    max_prefill_seq_len: int
-    # Maximum sequence length among decode batch. 0 if there are prefill
-    # requests only.
-    max_decode_seq_len: int
-    # (batch_size + 1,). The cumulative subquery lengths of the sequences in
-    # the batch, used to index into subquery. E.g., if the subquery length
-    # is [4, 6], it is [0, 4, 10].
-    query_start_loc: Optional[torch.Tensor]
-    # FIXME: It is for flash attn.
-    # (batch_size + 1,). The cumulative sequence lengths of the sequences in
-    # the batch, used to index into sequence. E.g., if the sequence length is
-    # [4, 6], it is [0, 4, 10].
-    seq_start_loc: Optional[torch.Tensor]
-    # (batch_size,) A tensor of context lengths (tokens that are computed
-    # so far).
-    context_lens_tensor: Optional[torch.Tensor]
-
-    # Whether or not if cuda graph is enabled.
-    # Cuda-graph is currently enabled for decoding only.
-    # TODO(woosuk): Move `use_cuda_graph` out since it's unrelated to attention.
-    use_cuda_graph: bool
-    _cached_prefill_metadata: Optional["XFormersMetadata"] = None
-    _cached_decode_metadata: Optional["XFormersMetadata"] = None
-
-    def __post_init__(self):
-        # Set during the execution of the first attention op.
-        # It is a list because it is needed to set per prompt
-        # when alibi slopes is used. It is because of the limitation
-        # from xformer API.
-        # will not appear in the __repr__ and __init__
-        self.attn_bias: Optional[List[AttentionBias]] = None
-
-    @property
-    def prefill_metadata(self) -> Optional["HiPAttentionMetadata"]:
-        if self.num_prefills == 0:
-            return None
-
-        if self._cached_prefill_metadata is not None:
-            return self._cached_prefill_metadata
-
-        assert self.seq_lens is not None
-        assert self.seq_lens_tensor is not None
-        assert self.query_start_loc is not None
-        assert self.context_lens_tensor is not None
-        assert self.block_tables is not None
-
-        self._cached_prefill_metadata = HiPAttentionMetadata(
-            num_prefills=self.num_prefills,
-            num_prefill_tokens=self.num_prefill_tokens,
-            num_decode_tokens=0,
-            slot_mapping=self.slot_mapping[:self.num_prefill_tokens],
-            seq_lens=self.seq_lens[:self.num_prefills],
-            seq_lens_tensor=self.seq_lens_tensor[:self.num_prefills],
-            max_query_len=self.max_query_len,
-            max_prefill_seq_len=self.max_prefill_seq_len,
-            max_decode_seq_len=0,
-            query_start_loc=self.query_start_loc[:self.num_prefills + 1],
-            seq_start_loc=None,
-            context_lens_tensor=self.context_lens_tensor[:self.num_prefills],
-            block_tables=self.block_tables[:self.num_prefills],
-            use_cuda_graph=False,
-        )
-        return self._cached_prefill_metadata
-
-    @property
-    def decode_metadata(self) -> Optional["HiPAttentionMetadata"]:
-        if self.num_decode_tokens == 0:
-            return None
-
-        if self._cached_decode_metadata is not None:
-            return self._cached_decode_metadata
-        assert self.block_tables is not None
-        assert self.seq_lens_tensor is not None
-
-        self._cached_decode_metadata = HiPAttentionMetadata(
-            num_prefills=0,
-            num_prefill_tokens=0,
-            num_decode_tokens=self.num_decode_tokens,
-            slot_mapping=self.slot_mapping[self.num_prefill_tokens:],
-            seq_lens=None,
-            seq_lens_tensor=self.seq_lens_tensor[self.num_prefills:],
-            max_query_len=None,
-            max_prefill_seq_len=0,
-            max_decode_seq_len=self.max_decode_seq_len,
-            query_start_loc=None,
-            seq_start_loc=None,
-            context_lens_tensor=None,
-            block_tables=self.block_tables[self.num_prefills:],
-            use_cuda_graph=self.use_cuda_graph,
-        )
-        return self._cached_decode_metadata
+class HiPAttentionMetadata(XFormersMetadata):
+    pass
 
 class HiPAttentionImpl(AttentionImpl[HiPAttentionMetadata]):
     """
@@ -366,7 +252,7 @@ class HiPAttentionImpl(AttentionImpl[HiPAttentionMetadata]):
                     if _BATCH_SIZE == 1:
                         query_batch_first = query.permute(1, 0, 2).contiguous()
                         
-                        attn_output, (indices, ks, _) = paged_timber_attention(
+                        attn_output, (indices, ks, _) = paged_hip_attention(
                             q=query_batch_first,
                             q_scale=self.scale,
                             k=key_cache,
@@ -442,7 +328,22 @@ class HiPAttentionImpl(AttentionImpl[HiPAttentionMetadata]):
                 _k = key_cache
                 _v = value_cache
                 
-                attn_output, (indices, ks, _) = paged_timber_attention(
+                def print_info(t: torch.Tensor):
+                    if t is not None and isinstance(t, torch.Tensor):
+                        print(f'{t.dtype}{list(t.shape)} {t.data_ptr():02X} {t.stride()} {t.numel()}')
+                    else:
+                        print('None')
+                
+                # print(attn_metadata.block_tables)
+                
+                # print_info(decode_query)
+                # print_info(_k)
+                # print_info(_v)
+                # print_info(attn_metadata.block_tables)
+                # print_info(attn_metadata.seq_lens_tensor)
+                # print(rope_method, self.using_precomputed_mask, attn_metadata.max_decode_seq_len)
+                
+                attn_output, (indices, ks, _) = paged_hip_attention(
                     q=decode_query,
                     q_scale=self.scale,
                     k=_k,
@@ -598,7 +499,7 @@ class HiPAttentionImpl(AttentionImpl[HiPAttentionMetadata]):
                 #     scale=self.scale
                 # )
                 
-                out, _ = timber_attention(
+                out, _ = hip_attention(
                     q=query_batch_first[:, start:end] * self.scale,
                     k=key_batch_first[:, start:end],
                     v=value_batch_first[:, start:end],
@@ -768,7 +669,7 @@ class HiPAttentionImpl(AttentionImpl[HiPAttentionMetadata]):
                     assert (attn_metadata.attn_bias is None) or isinstance(attn_metadata.attn_bias, BlockDiagonalCausalMask), f'{attn_metadata.attn_bias}'
                     assert self.alibi_slopes is None
                     
-                    output, _ = timber_attention(
+                    output, _ = hip_attention(
                         q=query * self.scale,
                         k=key,
                         v=value,
@@ -830,7 +731,7 @@ class HiPAttentionImpl(AttentionImpl[HiPAttentionMetadata]):
                 
                 # warnings.warn('paged attention backend is hip')
                 
-                output, (indices, ks, _) = paged_timber_attention(
+                output, (indices, ks, _) = paged_hip_attention(
                     q=query,
                     q_scale=self.scale,
                     k=key_cache,

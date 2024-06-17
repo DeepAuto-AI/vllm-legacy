@@ -9,24 +9,30 @@ PROMPT = "You are a helpful assistant in recognizes the content of tables in mar
 def test_prefix(llm=None, sampling_params=None, prompts=None):
     start_time = time.time()
 
-    llm.generate(prompts, sampling_params=sampling_params)
+    output = llm.generate(prompts, sampling_params=sampling_params)
+    for line in output:
+        for response in line.outputs:
+            print(f'`{response.text.strip()}`')
 
     end_time = time.time()
     print(f"cost time {end_time - start_time}")
 
 
 def main(args):
-    llm = LLM(model=args.model,
-              tokenizer_mode='auto',
-              trust_remote_code=True,
-              enforce_eager=True,
-              use_v2_block_manager=args.use_v2_block_manager,
-              tensor_parallel_size=args.tensor_parallel_size,
-              enable_prefix_caching=args.enable_prefix_caching)
+    llm = LLM(
+        model=args.model,
+        tokenizer_mode='auto',
+        trust_remote_code=True,
+        enforce_eager=True,
+        use_v2_block_manager=args.use_v2_block_manager,
+        tensor_parallel_size=args.tensor_parallel_size,
+        enable_prefix_caching=args.enable_prefix_caching,
+        gpu_memory_utilization=0.7,
+    )
 
-    num_prompts = 100
+    num_prompts = args.num_prompts
     prompts = [PROMPT] * num_prompts
-    sampling_params = SamplingParams(temperature=0, max_tokens=args.output_len)
+    sampling_params = SamplingParams(temperature=0.7, top_p=0.9, min_tokens=min(args.output_len, 16), max_tokens=args.output_len)
 
     print("------warm up------")
     test_prefix(
@@ -45,18 +51,31 @@ def main(args):
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(
-        description='Benchmark the performance with or without automatic '
-        'prefix caching.')
-    parser.add_argument('--model',
-                        type=str,
-                        default='baichuan-inc/Baichuan2-13B-Chat')
-    parser.add_argument('--tensor-parallel-size', '-tp', type=int, default=1)
-    parser.add_argument('--output-len', type=int, default=10)
-    parser.add_argument('--enable-prefix-caching',
-                        action='store_true',
-                        help='enable prefix caching')
-    parser.add_argument('--use-v2-block-manager',
-                        action='store_true',
-                        help='Use BlockSpaceMangerV2')
+        description='Benchmark the performance with or without automatic prefix caching.'
+    )
+    parser.add_argument(
+        '--model',
+        type=str,
+        default='Qwen/Qwen2-7B-Instruct-GPTQ-Int4'
+    )
+    parser.add_argument(
+        '--tensor-parallel-size', '-tp', type=int, default=1,
+    )
+    parser.add_argument(
+        '--output-len', type=int, default=32,
+    )
+    parser.add_argument(
+        '--num-prompts', type=int, default=100,
+    )
+    parser.add_argument(
+        '--enable-prefix-caching',
+        action='store_true',
+        help='enable prefix caching'
+    )
+    parser.add_argument(
+        '--use-v2-block-manager',
+        action='store_true',
+        help='Use BlockSpaceMangerV2'
+    )
     args = parser.parse_args()
     main(args)
