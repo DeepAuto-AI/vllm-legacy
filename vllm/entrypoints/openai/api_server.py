@@ -98,7 +98,7 @@ async def show_dev_metrics_runner():
     })
 
 @app.get("/dev/debug/envs")
-async def show_dev_metrics_runner():
+async def show_dev_debug_envs():
     return JSONResponse(content={
         'VLLM_ATTENTION_BACKEND': os.getenv('VLLM_ATTENTION_BACKEND', 'undefined'),
         'HIP_K': os.getenv('HIP_K', 'undefined'),
