@@ -584,6 +584,10 @@ def get_message(image_file: Optional[str]):
                     },
                     {
                         "type": "text",
+                        "text": f"Here is one of wikipedia page that i found. \n```\n{CONTENT[:15000]}\n```\n\n\n",
+                    },
+                    {
+                        "type": "text",
                         "text": "What is similarity and difference between above documents? Describe every precisely with examples and summary both documents.",
                     },
                 ],

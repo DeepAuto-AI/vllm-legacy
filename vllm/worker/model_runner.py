@@ -874,7 +874,7 @@ class ModelRunner:
         
         DEBUG_LOGITS_MASK = os.getenv('DEBUG_LOGITS_MASK', None)
         
-        if DEBUG_LOGITS_MASK is not None:
+        if (DEBUG_LOGITS_MASK is not None) and (logits is not None) and isinstance(logits, torch.Tensor):
             if not hasattr(ModelRunner, 'debug_logits_mask'):
                 ModelRunner.debug_logits_mask = torch.load(DEBUG_LOGITS_MASK, map_location=logits.device)
             if ModelRunner.debug_logits_mask.device != logits.device:

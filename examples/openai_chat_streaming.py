@@ -423,9 +423,18 @@ The single extant species of Ginkgophyta (Ginkgo biloba) has fleshy seeds produc
 """
 input = f"Hello world! Here I found the wikipedia docuemnt. Please summarize it.\n\n=== Document Starts ===\n\n{CONTENT}\n\n=== Document Ends ===\n\n"
 
+import argparse
+
+parser = argparse.ArgumentParser()
+parser.add_argument('--model', default='microsoft/Phi-3-mini-128k-instruct')
+parser.add_argument('--endpoint', default='http://localhost:8888/v1')
+parser.add_argument('--text', action='store_true')
+
+args = parser.parse_args()
+
 # Prepare the request data to be sent to the GPT API
 data = {
-    'model': 'microsoft/Phi-3-mini-128k-instruct',
+    'model': args.model,
     'stream': True,
     'max_tokens': 512,
     'messages': [
@@ -452,9 +461,9 @@ headers = {
 }
 
 # Send the request to the OpenAI API and process each chunk of data as it arrives
-response = requests.post('http://localhost:8888/v1/chat/completions', data=json.dumps(data), headers=headers, stream=True)
+response = requests.post(f'{args.endpoint}/chat/completions', data=json.dumps(data), headers=headers, stream=True)
 
-show_text = sys.argv[-1] == 'text'
+show_text = args.text
 
 if response.status_code == 200:
     prompt_throughput = 0
@@ -483,6 +492,6 @@ if response.status_code == 200:
     
     if show_text and len(throughputs) > 0:
         print('prompt throughput', prompt_throughput)
-        print('decode throughput', sum(throughputs) / len(throughputs))
+        print('decode throughput', list(sorted(throughputs))[len(throughputs) // 2], sum(throughputs) / len(throughputs))
 else:
     print("Request failed with status code: ", response.status_code)
