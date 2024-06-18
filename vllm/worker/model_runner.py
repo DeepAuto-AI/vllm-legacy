@@ -872,6 +872,15 @@ class ModelRunner:
         # Compute the logits.
         logits = self.model.compute_logits(hidden_states, sampling_metadata)
         
+        DEBUG_LOGITS_MASK = os.getenv('DEBUG_LOGITS_MASK', None)
+        
+        if DEBUG_LOGITS_MASK is not None:
+            if not hasattr(ModelRunner, 'debug_logits_mask'):
+                ModelRunner.debug_logits_mask = torch.load(DEBUG_LOGITS_MASK, map_location=logits.device)
+            if ModelRunner.debug_logits_mask.device != logits.device:
+                ModelRunner.debug_logits_mask = ModelRunner.debug_logits_mask.to(logits.device)
+            logits += ModelRunner.debug_logits_mask * (-32000.0)
+        
         for kv_cache in kv_caches:
             if kv_cache is not None and not is_prompt:
                 k_cache, v_cache = kv_cache
