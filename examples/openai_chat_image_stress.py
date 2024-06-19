@@ -584,7 +584,7 @@ def get_message(image_file: Optional[str]):
                     },
                     {
                         "type": "text",
-                        "text": f"Here is one of wikipedia page that i found. \n```\n{CONTENT[:15000]}\n```\n\n\n",
+                        "text": f"Here is one of wikipedia page that i found. \n```\n{CONTENT[:10000]}\n```\n\n\n",
                     },
                     {
                         "type": "text",
@@ -607,7 +607,7 @@ def thread_main(
 ):
     while True:
         # Getting the base64 string
-        time.sleep(random.random() * 5)
+        time.sleep(random.random() * 1)
         
         message = get_message(image_file)
         
