@@ -110,6 +110,7 @@ async def show_dev_debug_envs():
         'MEASURE_PEAK_MEMORY': os.getenv('MEASURE_PEAK_MEMORY', 'undefined'),
         'CUDA_VISIBLE_DEVICES': os.getenv('CUDA_VISIBLE_DEVICES', 'undefined'),
         'CUDA_LAUNCH_BLOCKING': os.getenv('CUDA_LAUNCH_BLOCKING', 'undefined'),
+        'DEBUG_LOGITS_MASK': os.getenv('DEBUG_LOGITS_MASK', 'undefined'),
         'CXX': os.getenv('CXX', 'undefined'),
         'CC': os.getenv('CC', 'undefined'),
         'LD': os.getenv('LD', 'undefined'),
