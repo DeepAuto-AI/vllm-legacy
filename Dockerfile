@@ -135,15 +135,16 @@ RUN --mount=type=cache,target=/root/.cache/pip \
     pip install accelerate hf_transfer modelscope
 
 ENV VLLM_USAGE_SOURCE production-docker-image
-# install hip
-RUN mkdir /workspace/hip
-COPY --from=hip hip /workspace/hip/hip
-COPY --from=hip setup.py /workspace/hip/setup.py
-RUN pip install -e /workspace/hip \
-    && pip install numba
-
-COPY --from=build /workspace/vllm/*.so /workspace/vllm/
-COPY vllm vllm
 
 ENTRYPOINT ["python3", "-m", "vllm.entrypoints.openai.api_server"]
 #################### OPENAI API SERVER ####################
+
+#################### HiP Attention ####################
+# Copy hip
+COPY --from=hip . /workspace/hip/
+# NOTE: We upgrade pip to support PEP 660 (pyproject.toml with editable installs)
+RUN --mount=type=cache,target=/root/.cache/pip \
+    python3 -m pip install --upgrade pip \
+    && pip install -e "/workspace/hip[openai]" \
+    && pip install -e "/workspace/hip[no_build_iso]" --no-build-isolation
+#################### HiP Attention ####################
